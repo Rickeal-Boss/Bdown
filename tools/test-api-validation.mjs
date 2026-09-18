@@ -229,3 +229,40 @@ main();
   }
 
 
+  // 场景 11：playurl 自动 qn 按账号状态挑选（不强制 127）
+  {
+    for (const [label, account, expectedQn] of [
+      ['已登录非会员', { isLogin: true, vip: false }, 80],
+      ['大会员',      { isLogin: true, vip: true  }, 127],
+      ['未登录',      null,                              64],
+    ]) {
+      const captured = [];
+      const api = new BiliApi({
+        fetchImpl: async (url) => {
+          captured.push(String(url));
+          if (/web-interface\/nav/.test(url)) {
+            return new Response(JSON.stringify({
+              code: 0,
+              data: {
+                isLogin: !!account && account.isLogin,
+                vipStatus: account && account.vip ? 1 : 0,
+                wbi_img: {
+                  img_url: 'https://i0.hdslb.com/bfs/wbi/' + 'a'.repeat(64) + '.png',
+                  sub_url: 'https://i0.hdslb.com/bfs/wbi/' + 'b'.repeat(64) + '.png',
+                },
+              },
+            }), { headers: { 'Content-Type': 'application/json' } });
+          }
+          return new Response(JSON.stringify({ code: 0, data: {} }), { headers: { 'Content-Type': 'application/json' } });
+        },
+      });
+      try { await api.playurl({ bvid: 'BV1xx411c7mD', cid: 62131, qn: 0 }); } catch {}
+      const playurlUrl = captured.find((u) => /playurl/.test(u)) || '';
+      const m = playurlUrl.match(/qn=(\d+)/);
+      const got = m ? Number(m[1]) : -1;
+      ok('账号=' + label + ' → qn=' + expectedQn + '（不让非会员被降级到 360P 预览）',
+        got === expectedQn, 'got qn=' + got + ' in ' + (m && m[0]));
+    }
+  }
+
+

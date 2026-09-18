@@ -260,9 +260,21 @@ export class BiliApi {
    */
   async playurl({ bvid, aid, cid, qn = 127, mode = 'dash', epId, fourk = 1 }) {
     const logged = await this.ensureAccount().then((a) => a.isLogin).catch(() => false);
+    // 自动清晰度的取值（qn=0 表示「让客户端按账号挑」）。
+    //
+    // B 站的清晰度上限规则：
+    //   - 大会员       → 全部（8K / 4K / HDR / 1080P60 / 1080P+ 高码率）
+    //   - 已登录非会员 → 1080P 30 帧（非高码率）
+    //   - 少数限免影片 → 满血清晰度（B 站自己放行，无需客户端特殊处理）
+    //
+    // 这里不能直接写 127：对已登录非会员，B 站遇到超出权限的 qn 会把整份
+    // 清单降级成 360P 预览，反而比 1080P 更差。也不能写 0：实测 qn=0 时
+    // 响应里 accept_quality 为 null，拿不到可用清单。
+    const account = await this.ensureAccount().catch(() => null);
+    const resolvedQn = qn > 0 ? qn : (account && account.vip ? 127 : (logged ? 80 : 64));
     const params = {
       cid,
-      qn,
+      qn: resolvedQn,
       fnver: 0,
       // 番剧（pgc）接口需要额外的 fnval 位才能拿到全部清晰度：
       // yt-dlp 对 pgc/player/web/v2/playurl 用的是 12240 = 4048 | 8192。
