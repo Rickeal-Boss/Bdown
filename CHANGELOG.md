@@ -1,3 +1,50 @@
+## [1.4.0] - 2026-09-18
+
+### 新增：对 DownKyi 深度分析后的落地改动
+
+分析了 `yaobiao131/downkyi` 与 `HanLuo/downkyicore` 的真实源码（详见
+`docs/DOWNKYI-ANALYSIS.md`），发现三处可落地差异：
+
+1. **课程（pugv / cheese）支持** —— Bdown 之前完全没有这个内容类型。
+   DownKyi 源码注释明确写了「**必须有 episodeId，否则会返回请求错误**」，
+   这正好解释了我们之前遇到的 code=-400。新增：
+   - `api.playurl` 的 `cheeseId` 分支 → `/pugv/player/web/playurl`（必带 `ep_id`）
+   - URL 解析：`/cheese/play/ep<id>` 与 `/cheese/play/ss<id>`
+
+2. **番剧 v2 → v1 降级** —— DownKyi 与 sakidown 都用 `/pgc/player/web/playurl`
+   （**v1**，只传 cid、不传 ep_id），yt-dlp 用 v2 + ep_id。两种都能通，
+   现在 v2 拿到 -400 时自动降级 v1，更稳。
+
+3. **路由三分支明确化**：ugc / pgc / pugv 各自走不同接口与参数。
+
+### 分析报告
+
+新增 `docs/DOWNKYI-ANALYSIS.md`，包含：
+- 签名层对比（**与 DownKyi 完全一致，无需改**）
+- playurl 参数对比（DownKyi 不用 `otype`/`platform`，但实测去掉后只返
+  `v_voucher` 拿不到 DASH —— **不能照抄**）
+- 内容类型接口差异表
+- 稳定性设计（DownKyi 的 `retry=2`、连接池、超时、可配 UA/代理）
+- 安全性/反风控对比（DownKyi 的 `buvid3` 对扩展是 **N/A** —— 浏览器自带
+  B 站 cookie，且我们已移除 `cookies` 权限无法自行注入）
+- 功能矩阵：哪些能借鉴（课程、番剧降级、弹幕多布局、收藏夹/UP主投稿），
+  哪些不能（ffmpeg 工具箱、Aria2、代理/UA 配置 —— 浏览器接管了）
+
+### 测试
+
+- 新增 `tools/test-playurl-routing.mjs`，**9 项**：ugc/番剧/课程三分支路由、
+  课程必带 ep_id、番剧 v2→v1 降级真的触发且拿到视频轨、缺 cid 本地拦截。
+- 已接入 CI。**核心自检总计 195 项**（21+57+19+63+26+9+合成）。
+
+### 待办（记录，未做）
+
+- `get()` 层网络异常重试（DownKyi `retry=2` 的做法）—— 我们目前只在
+  playurl 的 -403/-352/-412 上重试，网络层异常/5xx 不重试
+- 收藏夹 / UP 主全部投稿（DownKyi 有对应模块可参考）
+- 弹幕多布局算法（DownKyi 的 `DanmakuLayoutAlgorithm`）
+- 页面 `window.__playinfo__` 抓取降级 —— 实测 B 站现在是客户端渲染，
+  SSR HTML 里没有，需浏览器验证 JS 执行后是否存在
+
 ## [1.3.1] - 2026-09-18
 
 ### 新增：断点续传的持久化层（OPFS）

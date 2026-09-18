@@ -37,6 +37,11 @@ function parseVideoFromUrl(rawUrl) {
     if (ep) return { epId: Number(ep[1]), pageIndex: 0 };
     const ss = url.pathname.match(/\/bangumi\/play\/ss(\d+)/i);
     if (ss) return { seasonId: Number(ss[1]), pageIndex: 0 };
+    // 课程（pugv）：/cheese/play/ep<id> 与 /cheese/play/ss<id>
+    const cep = url.pathname.match(/\/cheese\/play\/ep(\d+)/i);
+    if (cep) return { cheeseId: Number(cep[1]), pageIndex: 0 };
+    const css = url.pathname.match(/\/cheese\/play\/ss(\d+)/i);
+    if (css) return { cheeseSeasonId: Number(css[1]), pageIndex: 0 };
     if (url.pathname.startsWith('/list/')) {
       const mid = url.searchParams.get('mid');
       if (mid) return { mid: Number(mid), pageIndex: 0, isSpace: true };

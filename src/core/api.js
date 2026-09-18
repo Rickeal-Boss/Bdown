@@ -258,7 +258,7 @@ export class BiliApi {
    * @param {number} [o.epId] 番剧 ep
    * @returns {Promise<PlayInfo>}
    */
-  async playurl({ bvid, aid, cid, qn = 127, mode = 'dash', epId, fourk = 1 }) {
+  async playurl({ bvid, aid, cid, qn = 127, mode = 'dash', epId, cheeseId, fourk = 1 }) {
     const logged = await this.ensureAccount().then((a) => a.isLogin).catch(() => false);
     // 自动清晰度的取值（qn=0 表示「让客户端按账号挑」）。
     //
@@ -292,6 +292,14 @@ export class BiliApi {
     else if (aid) params.avid = aid;
     if (!logged) params.try_look = 1;
 
+    // 课程（pugv）：DownKyi 的注释明确写了「必须有 episodeId，否则会返回请求
+    // 错误（code -400）」—— 所以 cheeseId 是必填，不能像番剧那样只给 cid。
+    const kind = cheeseId ? 'pugv' : epId ? 'pgc' : 'ugc';
+    const path = kind === 'pugv'
+      ? '/pugv/player/web/playurl'
+      : kind === 'pgc'
+        ? '/pgc/player/web/v2/playurl'
+        : '/x/player/wbi/playurl';
     // cid 是 playurl 的必填项。缺了它 B 站返回 code=-400「请求错误」，
     // 与「BV 不存在」返回的是同一个错误码，极难分辨——所以本地先说清楚。
     if (!cid) {
@@ -299,20 +307,34 @@ export class BiliApi {
         -400,
         '任务缺少 cid（分P 标识），无法请求播放地址。请回到视频页面重新点一次「下载」，' +
           '或在下载中心删除该任务后重新添加。',
-        `${API}${epId ? '/pgc/player/web/v2/playurl' : '/x/player/wbi/playurl'}?bvid=${bvid || ''}`,
+        `${API}${kind === 'pugv' ? '/pugv/player/web/playurl' : kind === 'pgc' ? '/pgc/player/web/v2/playurl' : '/x/player/wbi/playurl'}?bvid=${bvid || ''}`,
       );
     }
 
-    const path = epId
-      ? '/pgc/player/web/v2/playurl'
-      : '/x/player/wbi/playurl';
     if (epId) params.ep_id = epId;
+    if (cheeseId) params.ep_id = cheeseId;
 
     let data;
     try {
       data = await this.get(path, { params, signed: true });
     } catch (err) {
       // 签名密钥可能已过期，强制刷新后重试一次
+      // 番剧：v2（ep_id）拿不到就降级到 v1（只传 cid）。
+      // DownKyi 与 sakidown 都用 `/pgc/player/web/playurl` + cid，
+      // yt-dlp 用 v2 + ep_id —— 两种都能通，留个降级更稳。
+      if (kind === 'pgc' && err instanceof BiliError && err.code === -400) {
+        try {
+          warn('番剧 v2 接口失败，降级到 v1（只传 cid）', err.message);
+          const v1 = { cid, qn: resolvedQn, fnver: 0, fnval: FNVAL_DASH, fourk };
+          if (bvid) v1.bvid = bvid;
+          else if (aid) v1.avid = aid;
+          const res2 = await this.get('/pgc/player/web/playurl', { params: v1, signed: true });
+          const info2 = normalizePlayInfo(res2, mode);
+          if (info2 && (info2.videos.length || info2.durl.length)) { data = info2; return data; }
+        } catch (e2) {
+          warn('番剧 v1 降级也失败', e2?.message);
+        }
+      }
       if (err instanceof BiliError && ['-403', '-352', '-412'].includes(String(err.code))) {
         warn('playurl 失败，刷新 WBI 密钥后重试', err.message);
         resetMixinKey();
