@@ -123,3 +123,30 @@ console.log('\n' + (fail === 0 ? '\u2705' : '\u274c') + ' api 预校验自检' +
 }
 
 main();
+  // 场景 6：DNR 规则的 Origin 覆写必须正确（防止规则互相抵消）
+  {
+    const fs = await import('node:fs');
+    const rules = JSON.parse(fs.readFileSync(new URL('../rules/referer.json', import.meta.url), 'utf8'));
+    const originRules = rules.filter((r) =>
+      (r.action?.requestHeaders || []).some((h) => h.header.toLowerCase() === 'origin'));
+    ok('存在处理 Origin 的 DNR 规则', originRules.length >= 1, 'count=' + originRules.length);
+
+    // api.bilibili.com 的 set 规则必须优先级最高，否则会被宽泛的 remove 抵消
+    const apiSet = originRules.find((r) =>
+      (r.action?.requestHeaders || []).some((h) => h.header.toLowerCase() === 'origin' && h.operation === 'set')
+      && /api\\.bilibili\\.com/.test(r.condition?.regexFilter || ''));
+    ok('api.bilibili.com 有 Origin:set 规则', !!apiSet, 'not found');
+    if (apiSet) {
+      const broadRemove = originRules.find((r) =>
+        (r.action?.requestHeaders || []).some((h) => h.header.toLowerCase() === 'origin' && h.operation === 'remove')
+        && /bilibili\\.com/.test(r.condition?.regexFilter || ''));
+      ok('Origin:set 优先级严格高于宽泛的 Origin:remove',
+        !broadRemove || (apiSet.priority || 1) > (broadRemove.priority || 1),
+        'set=' + (apiSet.priority || 1) + ' remove=' + (broadRemove && (broadRemove.priority || 1)));
+      const v = (apiSet.action.requestHeaders.find((h) => h.header.toLowerCase() === 'origin') || {}).value;
+      ok('Origin 被设为 https://www.bilibili.com（B 站 WAF 只放行这个值）',
+        v === 'https://www.bilibili.com', 'value=' + v);
+    }
+  }
+
+

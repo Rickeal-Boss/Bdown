@@ -1,3 +1,52 @@
+## [1.2.0] - 2026-09-18
+
+### 🔴 找到 -400 的真正根因：B 站 WAF 只放行 Origin 为 bilibili.com 的请求
+
+用户给的真 BV `BV16s7b68EEz`（在 B 站**真实存在**，aid=116808682048293，
+标题「兔子！有空拍个视频吗？」）依然 -400。这次用 `curl` 穷举 Origin 拿到铁证：
+
+| 请求带的 Origin | HTTP | 结果 |
+|---|---|---|
+| `https://www.bilibili.com` | 200 | `code:0` ✅ |
+| 无 Origin | 200 | `code:0` ✅ |
+| `https://example.com` | 403 | WAF HTML 错误页 |
+| `chrome-extension://abcdefg` | **412** | WAF HTML「出错啦! - bilibili.com」 |
+
+**B 站的 WAF 会拦截 Origin 为 `chrome-extension://...` 的请求。**
+而 Chrome 的 `fetch()` 把 `Origin` 列为 forbidden header —— JS 无法设置，
+扩展页发起的跨域请求必然携带 `Origin: chrome-extension://<id>`，所以**一定被拦**。
+
+这也解释了为什么我前几轮用 curl / Node 怎么测都是 `code:0`：那两种环境里
+`Origin` 是我手动设的（或根本没发），压根没走到浏览器那条路径。
+
+### 修复
+
+- **`rules/referer.json` 新增 id 3 / id 4**：用 DNR 在网络层覆写 Origin
+  - id 3（priority 5）：`api.bilibili.com` → `Origin: https://www.bilibili.com`
+  - id 4（priority 4）：其他 `*.bilibili.com` / `b23.tv` → 移除 Origin
+  - DNR 在网络栈改头，**不受 fetch 的 forbidden-header 限制**（这正是我们
+    一直在用 DNR 设 Referer 的原因）。Chrome 官方文档：`append` 才受白名单
+    限制，`set` / `remove` 不受限（示例里甚至能 remove `cookie`）。
+  - **优先级必须 3 > 4**：id 4 的 `([^/]*\.)?bilibili\.com` 也会匹配
+    `api.bilibili.com`，同优先级时规则顺序在 Chrome 里是未定义行为。
+- **`api.get` 识别 WAF 拦截**：状态码 412/403 或 content-type 为 `text/html`
+  时，给出明确提示「被 B 站风控拦截（HTTP xxx）。扩展页的请求会带
+  Origin: chrome-extension://...，B 站只放行 ... 请确认 DNR 规则已生效并
+  重新加载扩展」，而不是含糊的「响应不是合法 JSON」。
+
+### 测试
+
+- `test-api-validation.mjs` 5 → 9 项：新增 DNR Origin 规则的 4 项校验
+  （存在 Origin 规则 / api.bilibili.com 有 set / set 优先级严格高于 remove /
+  Origin 值必须是 `https://www.bilibili.com`）。
+- **核心自检总计 66 项**（57 + 9），全部不联网。
+
+### 待验证
+
+- DNR 能否作用于「扩展页自己发出的请求」需你在浏览器确认。若无效，
+  备选方案是把 API 调用改由 bilibili.com 页面里的 content script 发起
+  （content script 的 Origin 天然是 `https://www.bilibili.com`）。
+
 ## [1.1.3] - 2026-09-18
 
 ### 修复

@@ -132,9 +132,35 @@ export class BiliApi {
       return res;
     }
 
-    if (!res.ok) throw new BiliError(res.status, `HTTP ${res.status}`, url.toString());
+    if (!res.ok) {
+      // B 站的 WAF 对「Origin 是 chrome-extension://」的请求返回 412/403 的
+      // HTML 错误页（标题「出错啦! - bilibili.com」）。这时状态码本身就说明
+      // 是被风控拦了，而不是接口业务错误，要单独说清楚。
+      const ctype = (res.headers && res.headers.get ? res.headers.get('content-type') : '') || '';
+      if (res.status === 412 || res.status === 403 || ctype.includes('text/html')) {
+        throw new BiliError(
+          res.status,
+          `被 B 站风控拦截（HTTP ${res.status}）。扩展页的请求会带 ` +
+            `Origin: chrome-extension://...，B 站只放行 Origin 为 ` +
+            `https://www.bilibili.com 或不含 Origin 的请求。请确认扩展的 ` +
+            `declarativeNetRequest 规则已生效（rules/referer.json 的 id 3/4），` +
+            `并重新加载扩展。`,
+          url.toString(),
+        );
+      }
+      throw new BiliError(res.status, `HTTP ${res.status}`, url.toString());
+    }
 
     let json;
+    const ctype = (res.headers && res.headers.get ? res.headers.get('content-type') : '') || '';
+    if (ctype.includes('text/html')) {
+      throw new BiliError(
+        -1,
+        'B 站返回了 HTML 错误页而不是 JSON，通常是被风控拦截（WAF）。' +
+          '请检查扩展的 declarativeNetRequest 规则是否生效。',
+        url.toString(),
+      );
+    }
     try {
       json = await res.json();
     } catch {

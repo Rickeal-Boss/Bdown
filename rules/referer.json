@@ -43,7 +43,50 @@
     },
     "condition": {
       "regexFilter": "^https?://([^/]*\\.)?(bilivideo\\.com|bilivideo\\.cn|akamaized\\.net|hdslb\\.com|biliapi\\.net)(:\\d+)?/",
-      "resourceTypes": ["image"]
+      "resourceTypes": [
+        "image"
+      ]
+    }
+  },
+  {
+    "id": 3,
+    "priority": 5,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "Origin",
+          "operation": "set",
+          "value": "https://www.bilibili.com"
+        }
+      ]
+    },
+    "condition": {
+      "regexFilter": "^https?://api\\.bilibili\\.com/",
+      "resourceTypes": [
+        "xmlhttprequest",
+        "other"
+      ]
+    }
+  },
+  {
+    "id": 4,
+    "priority": 4,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "Origin",
+          "operation": "remove"
+        }
+      ]
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/]*\\.)?(bilibili\\.com|bilibili\\.tv|b23\\.tv)(:\\d+)?/",
+      "resourceTypes": [
+        "xmlhttprequest",
+        "other"
+      ]
     }
   }
 ]
