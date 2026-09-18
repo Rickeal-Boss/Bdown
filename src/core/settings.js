@@ -50,6 +50,8 @@ export const DEFAULT_SETTINGS = {
 
   /** 并发任务数 */
   maxParallelTasks: 2,
+  /** 断点续传：默认关闭（浏览器端行为还没法在 CI 里验证，开启后如异常请关掉） */
+  resumeEnabled: false,
 
   /** 是否在视频页显示悬浮按钮 */
   showFloatingButton: true,

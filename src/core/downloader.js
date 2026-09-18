@@ -163,6 +163,8 @@ export async function downloadRanged({
   let lastBytes = downloaded;
   let speed = 0;
   let cursor = 0;
+  /** 最近一个写入成功的分片，供 onProgress 回传（续传记账用） */
+  let lastRange = null;
 
   const report = (force = false) => {
     const now = performance.now();
@@ -182,6 +184,9 @@ export async function downloadRanged({
       speed,
       elapsed,
       eta: speed > 0 ? (size - downloaded) / speed : Infinity,
+      // 最近完成的分片区间（闭区间，与 HTTP Range 一致）。
+      // 断点续传靠它增量记录进度；不需要续传时可以忽略。
+      range: lastRange ? { start: lastRange.start, end: lastRange.end } : null,
     });
   };
 
@@ -242,6 +247,7 @@ export async function downloadRanged({
           throwIfAborted();
           await sink.writeAt(range.start, out.bytes);
           range.done = true;
+          lastRange = { start: range.start, end: range.start + out.bytes.length - 1 };
           downloaded += out.bytes.length;
           if (out.shortAtEof && out.total) {
             // 真实大小比估算值小：修正进度基准，避免进度永远到不了 100%

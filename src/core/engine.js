@@ -18,6 +18,8 @@ import { BiliApi, pickVideoTrack, pickAudioTrack } from './api.js';
 import { downloadRanged, downloadSequential, probeSize, DownloadAborted } from './downloader.js';
 import { MemorySink, FileHandleSink, OpfsWorkspace, shouldUseMemory } from './sink.js';
 import { blobSource, memorySource, mergeDashStream } from './mp4.js';
+import { addRange } from './resume.js';
+import { ResumeStore, resumeKey } from './resume-store.js';
 import { parseDanmakuXml, danmakuToAss, danmakuToSrt, danmakuToText, filterDanmaku } from './danmaku.js';
 import { parseSubtitleJson, subtitleToSrt, subtitleToAss, subtitleToText, pickSubtitle } from './subtitle.js';
 import { buildFilename, buildVars } from './settings.js';
@@ -306,13 +308,16 @@ export class DownloadEngine {
         await this.finishOutput(aOut, task, destination, `${task.filename}.audio.m4a`, 'audio/mp4');
       } else {
         // DASH 合并模式：两条轨道先落到临时目标，再混流到最终输出
-        const vStage = await this.createTemp(task, plan.video.size, tempNames);
-        staging.video = vStage;
+        const vPrep = await this.prepareStage({
+          task, spec, plan, track: 'v', size: plan.video.size, tempNames,
+        });
+        staging.video = vPrep.sink;
         await this.fetchTo({
           urls: [plan.video.url, ...plan.video.backupUrls],
           size: plan.video.size,
-          sink: vStage,
+          sink: vPrep.sink,
           signal,
+          resume: vPrep.resume,
           onProgress: (p) => {
             task.speed = p.speed;
             task.eta = p.eta;
@@ -321,13 +326,16 @@ export class DownloadEngine {
         });
         if (task.canceled) throw new DownloadAborted();
 
-        const aStage = await this.createTemp(task, plan.audio.size, tempNames);
-        staging.audio = aStage;
+        const aPrep = await this.prepareStage({
+          task, spec, plan, track: 'a', size: plan.audio.size, tempNames,
+        });
+        staging.audio = aPrep.sink;
         await this.fetchTo({
           urls: [plan.audio.url, ...plan.audio.backupUrls],
           size: plan.audio.size,
-          sink: aStage,
+          sink: aPrep.sink,
           signal,
+          resume: aPrep.resume,
           onProgress: (p) => {
             task.speed = p.speed;
             task.eta = p.eta;
@@ -422,6 +430,38 @@ export class DownloadEngine {
   }
 
   /** 创建临时中间目标（不直接落用户目录）。 */
+  /**
+   * 为一条轨道准备下载目标。
+   *
+   * 开启续传（settings.resumeEnabled）时用 ResumeStore 的持久分片，
+   * 跨会话有效；否则用普通临时目标（内存 / OPFS 临时文件）。
+   *
+   * @param {'v'|'a'} track 视轨 / 音轨
+   */
+  async prepareStage({ task, spec, plan, track, size, tempNames }) {
+    if (this.settings.resumeEnabled) {
+      try {
+        const store = this.resumeStore || (this.resumeStore = new ResumeStore());
+        const key = resumeKey({
+          bvid: spec.bvid,
+          aid: spec.aid,
+          cid: spec.cid,
+          epId: spec.epId,
+          quality: plan.quality,
+          codec: plan.codec,
+          track,
+        });
+        if (key) {
+          const opened = await store.openPartial(key, size);
+          return { sink: opened.sink, resume: { store, key, ranges: opened.ranges }, resumed: opened.resumed };
+        }
+      } catch (err) {
+        warn('续传目标打开失败，回退到临时文件', err?.message);
+      }
+    }
+    return { sink: await this.createTemp(task, size, tempNames), resume: null, resumed: false };
+  }
+
   async createTemp(task, sizeHint, tempNames) {
     if (shouldUseMemory(sizeHint)) return new MemorySink();
     const tempName = `${task.id}-${Math.random().toString(36).slice(2, 8)}.tmp`;
@@ -456,7 +496,14 @@ export class DownloadEngine {
   }
 
   /** 统一的分片下载入口，必要时回退到顺序下载。 */
-  async fetchTo({ urls, size, sink, onProgress, signal, probe = true }) {
+  /**
+   * 下载一条轨道到 sink。
+   *
+   * `resume` 传入续传描述（见 ResumeStore.openPartial）时，只下载缺失区间，
+   * 并随分片完成增量更新清单——这样中途取消 / 崩溃后下次能接着下。
+   * 默认关闭（settings.resumeEnabled），因为浏览器端行为还没法在 CI 里验证。
+   */
+  async fetchTo({ urls, size, sink, onProgress, signal, probe = true, resume = null }) {
     const list = (urls || []).filter(Boolean);
     if (!list.length) throw new Error('没有可用的下载地址');
     let total = size;
@@ -465,13 +512,46 @@ export class DownloadEngine {
       total = p.size;
     }
     const concurrency = Math.max(1, Math.min(16, this.settings.concurrency || 8));
+
+    /** 已完成的区间（续传时非空） */
+    let doneRanges = resume && resume.ranges ? [...resume.ranges] : [];
+    const persistProgress = async () => {
+      if (!resume || !resume.store || !resume.key) return;
+      await resume.store.write(resume.key, { size: total, ranges: doneRanges });
+    };
+
     try {
-      return await downloadRanged({ urls: list, size: total, sink, concurrency, signal, onProgress, probe });
+      const result = await downloadRanged({
+        urls: list,
+        size: total,
+        sink,
+        concurrency,
+        signal,
+        onProgress: (p) => {
+          // 分片完成时增量记录：p 里带 range 就记一段
+          if (resume && p && p.range && Number.isFinite(p.range.start) && Number.isFinite(p.range.end)) {
+            doneRanges = addRange(doneRanges, { start: p.range.start, end: p.range.end + 1 });
+            // 不 await，避免拖慢下载；节流交给调用方（每 300ms 的 report）
+            persistProgress().catch(() => {});
+          }
+          onProgress?.(p);
+        },
+        probe,
+        resumeRanges: doneRanges.length ? doneRanges : null,
+      });
+      if (resume) await resume.store.clear(resume.key);
+      return result;
     } catch (err) {
-      if (err instanceof DownloadAborted) throw err;
+      if (err instanceof DownloadAborted) {
+        // 用户取消：保留清单，下次可续
+        await persistProgress().catch(() => {});
+        throw err;
+      }
       warn('分片下载失败，回退到顺序下载', err.message);
       if (sink instanceof MemorySink) sink.records = [];
       if (sink instanceof FileHandleSink) sink.size = 0;
+      // 回退顺序下载时不能续传（会重下整个文件），清掉清单避免半份残留
+      if (resume) await resume.store.clear(resume.key).catch(() => {});
       return downloadSequential({ urls: list, sink, signal, onProgress });
     }
   }

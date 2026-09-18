@@ -1,3 +1,37 @@
+## [1.3.1] - 2026-09-18
+
+### 新增：断点续传的持久化层（OPFS）
+
+- **`src/core/resume-store.js`**
+  - `resumeKey({bvid/aid/cid/epId, quality, codec, track})` —— 由**内容身份**
+    派生 key。**刻意不含 URL**：CDN 地址每次 playurl 都会换，但内容字节不变，
+    拿 URL 当身份会导致续传永远命中不了。
+  - `canResume(meta, expectedSize, {ttlMs})` —— 清单校验，必须同时满足：
+    size 完全一致（换清晰度 / CDN 内容变了都不续）、没过期（默认 7 天）、
+    已完成区间有效、且**真的没下完**（下完就不该走续传路径）
+  - `ResumeStore`（OPFS）：`<key>.part` 存部分内容 + `<key>.json` 存清单。
+    `FileHandleSink.open()` 本来就用了 `createWritable({keepExistingData:true})`，
+    重开不会清空已有字节 —— 天然支持续传
+  - 每个方法都不抛异常（读不到 / 写失败都返回 null / false），避免续传问题
+    反而把正常下载搞挂
+
+- **接线**：
+  - `DownloadEngine.prepareStage()` —— 开启续传时用持久分片替代临时文件
+  - `fetchTo` 支持 `resume` 参数，随分片完成增量写清单；成功下载完清掉清单；
+    用户取消时**保留**清单（这才叫续传）；回退顺序下载时清掉（会重下整个文件）
+  - `downloadRanged` 的 `onProgress` 新增 `range` 字段（最近完成的分片区间），
+    让上层能精确记账
+
+- **设置**：`resumeEnabled`，**默认 false**。选项页有开关（标注「实验性」）。
+  浏览器端行为没法在 CI 里验证，所以默认关；出问题关掉即可，不影响主流程。
+
+### 测试
+
+- 新增 `tools/test-resume-store.mjs`，**26 项**，全部不联网：
+  - key 派生（含"不含 URL"、清晰度/轨道/cid 区分度、缺 cid 返回空、codec 特殊字符清洗）
+  - 清单校验（大小不匹配 / 过期 / 空区间 / 已下完 等 10 种拒绝场景 + 4 种通过场景）
+- 已接入 CI。**核心自检总计 186 项**（21 + 57 + 19 + 63 + 26 + 合成自检）。
+
 ## [1.3.0] - 2026-09-18
 
 ### 新增：断点续传（底层能力）

@@ -28,6 +28,9 @@ jobs:
       - name: 断点续传逻辑自检（区间合并 / 缺失计算 / 续传集成）
         run: node tools/test-resume.mjs
 
+      - name: 断点续传持久化纯逻辑自检（key 派生 / 清单校验）
+        run: node tools/test-resume-store.mjs
+
       - name: 用合成 m4s 跑一遍混流器自检
         run: node tools/selftest-synthetic.mjs
 
