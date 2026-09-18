@@ -247,6 +247,7 @@ export async function scanFile(source) {
           duration: info.duration,
           timescale: mediaTimescale,
           tfhdTrackIdOffset: info.tfhdTrackIdOffset,
+          tfhdTrackIdOffsets: info.tfhdTrackIdOffsets,
           // moof[0..8] + mfhd size[8..12] + 'mfhd'[12..16] + version/flags[16..20] + sequence_number[20..24]
           mfhdSeqOffset: absStart + 20,
         });
@@ -283,56 +284,106 @@ export async function scanFile(source) {
   };
 }
 
+/**
+ * 单个 trun 里的样本时长总和。
+ *
+ * 未显式携带 sample_duration 时，回退顺序为：tfhd 的 default_sample_duration
+ * → trex 的 default_sample_duration。B 站 m4s 的 tfhd 通常只有
+ * default-base-is-moof（0x020000），所以时长实际来自 trex（视频 640、音频 1024）。
+ */
+function readTrunDuration(bytes, trun, tfhd, trexDefaults) {
+  const flags = boxFlags(bytes, trun);
+  let p = trun.start + trun.headerSize + 4;
+  const sampleCount = u32(bytes, p);
+  p += 4;
+  if (flags & 0x000001) p += 4; // data_offset（int32，相对 base_data_offset）
+  if (flags & 0x000004) p += 4; // first_sample_flags
+
+  const defDuration = tfhd ? readTfhdDefaultDuration(bytes, tfhd) : 0;
+  const fallback = defDuration || trexDefaults?.duration || 0;
+  const hasDuration = !!(flags & 0x000100);
+  let total = 0;
+  for (let i = 0; i < sampleCount; i++) {
+    if (hasDuration) {
+      total += u32(bytes, p);
+      p += 4;
+    } else {
+      total += fallback;
+    }
+    if (flags & 0x000200) p += 4; // sample_size
+    if (flags & 0x000400) p += 4; // sample_flags
+    // sample_composition_time_offset：version 1 时是 int32（有符号），
+    // 但这里只跳过不取值，所以有无符号都不影响。
+    if (flags & 0x000800) p += 4;
+  }
+  return total;
+}
+
 /** 解析 moof，取出轨道号、解码时间与总时长。 */
 function parseMoof(moofBytes, absMoofStart, mediaTimescale, trexDefaults) {
-  const result = { trackId: 1, baseTime: 0, duration: 0, timescale: mediaTimescale, tfhdTrackIdOffset: -1 };
+  const result = {
+    trackId: 1,
+    baseTime: 0,
+    duration: 0,
+    timescale: mediaTimescale,
+    tfhdTrackIdOffset: -1,
+    /** 一个 moof 可能含多个 traf，每个 traf 的 track_ID 都要单独补。 */
+    tfhdTrackIdOffsets: [],
+  };
   const self = readBoxHeader(moofBytes, 0, moofBytes.length);
   if (!self || self.type !== 'moof') return result;
   const children = listBoxes(moofBytes, self.headerSize, self.end);
-  const traf = findBox(children, 'traf');
-  if (!traf) return result;
+  const trafs = findBoxes(children, 'traf');
+  if (!trafs.length) return result;
 
-  const trafChildren = listBoxes(moofBytes, traf.start + traf.headerSize, traf.end);
+  let baseTime = Infinity;
+  let endTime = 0;
 
-  const tfhd = findBox(trafChildren, 'tfhd');
-  if (tfhd) {
-    result.trackId = u32(moofBytes, tfhd.start + tfhd.headerSize + 4);
-    result.tfhdTrackIdOffset = absMoofStart + tfhd.start + tfhd.headerSize + 4;
-  }
+  for (const traf of trafs) {
+    const trafChildren = listBoxes(moofBytes, traf.start + traf.headerSize, traf.end);
+    const tfhd = findBox(trafChildren, 'tfhd');
 
-  const tfdt = findBox(trafChildren, 'tfdt');
-  if (tfdt) {
-    const version = moofBytes[tfdt.start + tfdt.headerSize];
-    const p = tfdt.start + tfdt.headerSize + 4;
-    result.baseTime = version === 1 ? u32(moofBytes, p) * 4294967296 + u32(moofBytes, p + 4) : u32(moofBytes, p);
-  }
-
-  const trun = findBox(trafChildren, 'trun');
-  if (trun) {
-    const flags = boxFlags(moofBytes, trun);
-    let p = trun.start + trun.headerSize + 4;
-    const sampleCount = u32(moofBytes, p);
-    p += 4;
-    if (flags & 0x000001) p += 4; // data_offset
-    if (flags & 0x000004) p += 4; // first_sample_flags
-
-    const defDuration = tfhd ? readTfhdDefaultDuration(moofBytes, tfhd) : 0;
-    const fallback = defDuration || trexDefaults?.duration || 0;
-    const hasDuration = !!(flags & 0x000100);
-    let total = 0;
-    for (let i = 0; i < sampleCount; i++) {
-      if (hasDuration) {
-        total += u32(moofBytes, p);
-        p += 4;
-      } else {
-        total += fallback;
+    if (tfhd) {
+      const flags = boxFlags(moofBytes, tfhd);
+      const defaultBaseIsMoof = (flags & 0x020000) !== 0;
+      const baseDataOffsetPresent = (flags & 0x000001) !== 0;
+      // 无损合并的前提：样本地址相对 moof 起点。若写的是文件绝对地址，
+      // 一旦把 moof+mdat 整体搬走，trun.data_offset 就指向了错误位置。
+      if (!defaultBaseIsMoof && baseDataOffsetPresent) {
+        throw new Error(
+          '该媒体片段的 tfhd 使用了绝对 base_data_offset（flags 含 0x000001 且未置 default-base-is-moof），' +
+          '搬迁后样本地址会失效，无法无损合并。请改用「仅视频」或「仅音频」模式。'
+        );
       }
-      if (flags & 0x000200) p += 4; // sample_size
-      if (flags & 0x000400) p += 4; // sample_flags
-      if (flags & 0x000800) p += 4; // composition_time_offset
+      const idOffset = absMoofStart + tfhd.start + tfhd.headerSize + 4;
+      const trackId = u32(moofBytes, tfhd.start + tfhd.headerSize + 4);
+      result.tfhdTrackIdOffsets.push({ offset: idOffset, trackId });
+      if (result.tfhdTrackIdOffsets.length === 1) {
+        result.tfhdTrackIdOffset = idOffset;
+        result.trackId = trackId;
+      }
     }
-    result.duration = total;
+
+    let trafBaseTime = 0;
+    const tfdt = findBox(trafChildren, 'tfdt');
+    if (tfdt) {
+      const version = moofBytes[tfdt.start + tfdt.headerSize];
+      const p = tfdt.start + tfdt.headerSize + 4;
+      trafBaseTime =
+        version === 1 ? u32(moofBytes, p) * 4294967296 + u32(moofBytes, p + 4) : u32(moofBytes, p);
+    }
+
+    let trafDuration = 0;
+    for (const trun of findBoxes(trafChildren, 'trun')) {
+      trafDuration += readTrunDuration(moofBytes, trun, tfhd, trexDefaults);
+    }
+
+    baseTime = Math.min(baseTime, trafBaseTime);
+    endTime = Math.max(endTime, trafBaseTime + trafDuration);
   }
+
+  result.baseTime = Number.isFinite(baseTime) ? baseTime : 0;
+  result.duration = Math.max(0, endTime - result.baseTime);
   return result;
 }
 
@@ -532,7 +583,13 @@ export async function mergeDashStream({ videoSource, audioSource, write, onProgr
 
     // 需要打的补丁：mfhd.sequence_number 与（必要时）tfhd.track_ID
     const patches = [{ offset: f.mfhdSeqOffset, value: seq }];
-    if (f.tfhdTrackIdOffset >= 0 && f.trackId !== expectedTrackId) {
+    // 一个 moof 内可能有多个 traf，逐个把 track_ID 统一成 1（视频）/ 2（音频）
+    for (const t of f.tfhdTrackIdOffsets || []) {
+      if (t.offset >= 0 && t.trackId !== expectedTrackId) {
+        patches.push({ offset: t.offset, value: expectedTrackId });
+      }
+    }
+    if (!(f.tfhdTrackIdOffsets || []).length && f.tfhdTrackIdOffset >= 0 && f.trackId !== expectedTrackId) {
       patches.push({ offset: f.tfhdTrackIdOffset, value: expectedTrackId });
     }
 

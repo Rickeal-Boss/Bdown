@@ -2,6 +2,54 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.0.1] - 2026-09-18
+
+源码级审查后的加固版本。所有结论均以真实源码比对或独立实现交叉验证为准。
+
+### 修复
+
+- **安全：分P标题 HTML 注入（🟠）**
+  `src/popup/popup.js` 把 UP 主可控的 `p.part` 直接拼进 `innerHTML`，一个恶意投稿标题即可在
+  `chrome-extension://` 源下执行脚本，进而读取 `chrome.storage` 与扩展内部消息通道。
+  新增 `escapeHtml()` 并对所有接口来源文本转义。
+- **安全：文件名欺骗与保留名（🟡）**
+  `sanitizeFilename()` 现在会剥离 Unicode 双向覆盖字符（`U+202A–U+202E` 等，可把
+  `video.exe` 显示成 `video.exe` 之外的后缀），规避 Windows 保留设备名
+  （`CON`/`NUL`/`COM1`/`LPT9`），并去掉开头的可疑点号（`../` 此前会被洗成 `.._`）。
+- **正确：WBI 签名的编码器语义（🟠，潜在）**
+  `signParams()` 原先用 `encodeURIComponent`，与服务端（Python `urllib.parse.urlencode`）
+  的转义集合不一致——空格 `%20` vs `+`、`~` `%7E` vs `~`、`!*'()` 原样 vs `%21%2A%27%28%29`。
+  当前参数恰好不含这些字符所以线上正常，属「碰巧没踩到」。新增 `formUrlEncode()`，
+  用 Python 实测值逐项对拍。
+- **正确：混流器对不可搬迁片段的处理（🟠）**
+  `parseMoof()` 现在会检查 `tfhd.flags`：若使用绝对 `base_data_offset`（`0x000001` 且未置
+  `default-base-is-moof`），搬迁后样本地址必然失效 → 直接抛明确错误，而不是静默产出坏文件。
+- **正确：混流器支持 moof 内多 traf / 多 trun（🟡）**
+  原先只取第一个 `traf` 与第一个 `trun`，多轨片段会算错时长、漏补 `track_ID`。
+  现改为遍历全部，时长取各 traf 的最晚结束时间，`track_ID` 逐个打补丁。
+
+### 变更
+
+- **权限最小化**：移除 `scripting`、`notifications`、`cookies`（全仓库 0 处引用）。
+  登录态高清晰度依赖 `host_permissions` + `credentials: 'include'`，不需要 `chrome.cookies` API。
+- **移除 `web_accessible_resources`**：代码从未被页面引用（content script 不注入图标、
+  不 fetch 扩展页），保留会让任意 `bilibili.com` 页面探测到扩展并把 dashboard 塞进 iframe。
+- **番剧接口 fnval 改 12240**（原 4048）。依据：yt-dlp 对 `pgc/player/web/v2/playurl`
+  使用 `fnval: 12240 = 4048 | 8192`，可拿到更多清晰度。
+
+### 新增
+
+- `tools/selftest-core.mjs`：43 项核心模块行为自检（XSS 向量、`formUrlEncode` 与 Python
+  对拍、MD5 与 Node `crypto` 对拍含分块边界、AV/BV 往返 2 万次 + Python 独立向量、
+  文件名安全）。已接入 GitHub Actions。
+
+### 验证
+
+- WBI 乱序表 `MIXIN_KEY_ENC_TAB` 与 yt-dlp `bilibili.py` **逐项一致**（64 项全比对）
+- `fnval=4048`、`dm_img_*` 参数（含 `dm_img_inter` 紧凑 JSON）与 yt-dlp `_dm_params` 一致
+- 4 个图标经 PNG magic + IHDR 校验，确为 16/32/48/128 真实 PNG
+- `manifest.json` 与 `package.json` 版本一致（1.0.0），`_locales` 的 `__MSG_*` 均被正确引用
+
 ## [1.0.0] - 2026-09-18
 
 首个可用版本。

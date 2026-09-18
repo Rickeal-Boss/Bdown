@@ -75,16 +75,29 @@ export function toAssTime(seconds) {
   return `${h}:${p(m)}:${p(s)}.${p(c)}`;
 }
 
+/** Windows 保留设备名（带不带扩展名都不允许作为文件名）。 */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
+
 /** 去掉文件名中的非法字符，并限制长度。 */
 export function sanitizeFilename(name, { replacement = '_', maxLength = 120 } = {}) {
   let out = String(name ?? '')
+    // 目录分隔符与 Windows 非法字符；控制字符一并清掉
     // eslint-disable-next-line no-control-regex
     .replace(/[\\/:*?"<>|\u0000-\u001f]/g, replacement)
+    // Unicode 双向覆盖字符：可被用来做文件名欺骗（看起来是 .mp4 实际后缀在前）
+    .replace(/[\u202a-\u202e\u2066-\u2069\u200e\u200f]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
+    // 去掉开头的点：既避免产生隐藏文件，也让 "../" 这类输入
+    // 在分隔符被替换成 "_" 之后（".._"）不再残留成可疑文件名
+    .replace(/^[.\s]+/, '')
     .replace(/[. ]+$/, '');
-  if (out.length > maxLength) out = out.slice(0, maxLength).trim();
-  return out || 'untitled';
+  // 保留设备名（con / nul / com1 …）在 Windows 上写盘会失败，加下划线前缀规避
+  if (WINDOWS_RESERVED.test(out)) out = `_${out}`;
+  if (out.length > maxLength) out = out.slice(0, maxLength).trim().replace(/[. ]+$/, '');
+  // 只剩下 . _ - 空白的名字没有有效信息，统一兜底
+  if (!out || !/[^\s._-]/.test(out)) return 'untitled';
+  return out;
 }
 
 /** 解析 `1-3` / `1-` / `-3` / `5` 形式的分P选择表达式。 */
@@ -151,6 +164,20 @@ export function dateVars(ts) {
     minute: p(d.getMinutes()),
     second: p(d.getSeconds()),
   };
+}
+
+/**
+ * HTML 转义。
+ *
+ * 凡是来自 B 站接口的文本（视频标题、分 P 标题、UP 主名、简介……）在写入
+ * innerHTML 之前必须先过这一层。这些字段由 UP 主完全可控，若不转义，
+ * 一个恶意投稿标题就能在 chrome-extension:// 源下执行脚本，进而读取
+ * chrome.storage、调用扩展内部消息通道。
+ */
+const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+export function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => HTML_ESCAPE_MAP[c]);
 }
 
 export function log(...args) {

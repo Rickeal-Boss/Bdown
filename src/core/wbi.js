@@ -29,6 +29,35 @@ const MIXIN_KEY_ENC_TAB = [
 /** 值里必须剔除的字符（B 站前端 filter 的字符集）。 */
 const FORBIDDEN_CHARS = /[!'()*]/g;
 
+/**
+ * 与 Python `urllib.parse.urlencode`（默认 quote_via=quote_plus）等价的编码器。
+ *
+ * 必须用这个而不是 `encodeURIComponent`，两者的转义集合不同：
+ *   | 字符 | Python quote_plus | encodeURIComponent |
+ *   |------|-------------------|--------------------|
+ *   | 空格 | `+`               | `%20`              |
+ *   | `~`  | `~`（不转义）     | `%7E`              |
+ *   | `!*'()` | `%21%2A%27%28%29` | 原样保留         |
+ *
+ * 服务端算 w_rid 用的是 Python 语义，一旦参数里出现上述任一字符，用
+ * encodeURIComponent 就会算出不同的 w_rid 而被判签名错误。当前我们的参数
+ * （bvid / cid / qn / fnval / wts …）不含这些字符，所以线上表现正常，
+ * 但这属于「碰巧没踩到」的隐患，必须按服务端语义实现。
+ */
+const UNRESERVED = /[A-Za-z0-9_.\-~]/;
+
+export function formUrlEncode(value) {
+  const bytes = new TextEncoder().encode(String(value ?? ''));
+  let out = '';
+  for (const b of bytes) {
+    const ch = String.fromCharCode(b);
+    if (UNRESERVED.test(ch)) out += ch;
+    else if (ch === ' ') out += '+';
+    else out += '%' + b.toString(16).toUpperCase().padStart(2, '0');
+  }
+  return out;
+}
+
 const KEY_TTL = 10 * 60 * 1000; // 官方无明确过期时间，取 10 分钟足够保守
 
 let cachedMixinKey = '';
@@ -81,7 +110,7 @@ export function signParams(params, mixinKey) {
     cleaned[key] = String(raw).replace(FORBIDDEN_CHARS, '');
   }
   const query = Object.entries(cleaned)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .map(([k, v]) => `${formUrlEncode(k)}=${formUrlEncode(v)}`)
     .join('&');
   return { ...cleaned, w_rid: md5(query + mixinKey) };
 }
@@ -94,7 +123,7 @@ export async function signedQuery(params, fetchNav) {
   const mixinKey = await getMixinKey(fetchNav);
   const signed = signParams(params, mixinKey);
   return Object.entries(signed)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .map(([k, v]) => `${formUrlEncode(k)}=${formUrlEncode(v)}`)
     .join('&');
 }
 

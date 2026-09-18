@@ -19,6 +19,8 @@ const REFERER = 'https://www.bilibili.com/';
 
 /** fnval 位掩码：DASH + HDR + 4K + 杜比音频 + 杜比视界 + 8K + AV1 */
 export const FNVAL_DASH = 16 | 64 | 128 | 256 | 512 | 1024 | 2048; // = 4048
+/** 番剧接口额外需要的位（yt-dlp 用 12240 = 4048 | 8192）。 */
+export const FNVAL_PGC_DASH = FNVAL_DASH | 8192; // = 12240
 /** fnval=1 时返回 durl（可直下的单文件 MP4/FLV），清晰度上限较低。 */
 export const FNVAL_DURL = 1;
 
@@ -181,7 +183,9 @@ export class BiliApi {
       cid,
       qn,
       fnver: 0,
-      fnval: mode === 'durl' ? FNVAL_DURL : FNVAL_DASH,
+      // 番剧（pgc）接口需要额外的 fnval 位才能拿到全部清晰度：
+      // yt-dlp 对 pgc/player/web/v2/playurl 用的是 12240 = 4048 | 8192。
+      fnval: mode === 'durl' ? FNVAL_DURL : epId ? FNVAL_PGC_DASH : FNVAL_DASH,
       fourk,
       otype: 'json',
       platform: 'pc',

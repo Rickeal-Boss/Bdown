@@ -5,7 +5,7 @@
 import { BiliApi, pickVideoTrack, pickAudioTrack } from '../core/api.js';
 import { QUALITIES, qualityShort } from '../core/quality.js';
 import { loadSettings, saveSettings } from '../core/settings.js';
-import { extractVideoId, formatBytes, formatDuration, parseRangeExpr, sanitizeFilename, applyTemplate, formatNumber } from '../core/util.js';
+import { extractVideoId, formatBytes, formatDuration, parseRangeExpr, sanitizeFilename, applyTemplate, formatNumber, escapeHtml } from '../core/util.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -194,9 +194,9 @@ function render() {
     const badges = [];
     if (!opt.available && opt.needVip) badges.push('<span class="bd-badge bd-badge--warn">大会员</span>');
     else if (!opt.available && opt.needLogin) badges.push('<span class="bd-badge bd-badge--warn">需登录</span>');
-    if (opt.codec) badges.push(`<span class="bd-badge">${opt.codec}</span>`);
+    if (opt.codec) badges.push(`<span class="bd-badge">${escapeHtml(opt.codec)}</span>`);
     el.innerHTML = `
-      <span class="q-name">${opt.label}</span>
+      <span class="q-name">${escapeHtml(opt.label)}</span>
       ${badges.join('')}
       <span class="q-size">${opt.available ? formatBytes(opt.size) : '不可用'}</span>`;
     if (opt.available) {
@@ -235,7 +235,7 @@ function render() {
       label.className = 'page-item';
       label.innerHTML = `
         <input type="checkbox" ${selectedPages.has(i + 1) ? 'checked' : ''} />
-        <span class="p-name">P${p.page} ${p.part || ''}</span>
+        <span class="p-name">P${escapeHtml(p.page)} ${escapeHtml(p.part || '')}</span>
         <span class="p-dur">${formatDuration(p.duration || 0)}</span>`;
       label.querySelector('input').addEventListener('change', (e) => {
         if (e.target.checked) selectedPages.add(i + 1);
