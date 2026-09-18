@@ -1,0 +1,23 @@
+name: validate
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 静态校验（JS 语法 / JSON / manifest 引用 / DNR 规则）
+        run: node tools/validate.mjs
+
+      - name: 用合成 m4s 跑一遍混流器自检
+        run: node tools/selftest-synthetic.mjs

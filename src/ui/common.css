@@ -1,0 +1,322 @@
+/* Bdown 共用设计令牌与基础组件 */
+
+:root {
+  --bd-pink: #fb7299;
+  --bd-pink-dark: #e35d84;
+  --bd-blue: #00a1d6;
+  --bd-blue-dark: #0089b8;
+  --bd-radius: 10px;
+  --bd-radius-sm: 7px;
+
+  --bd-bg: #f6f7f9;
+  --bd-surface: #ffffff;
+  --bd-surface-2: #f0f1f4;
+  --bd-border: #e3e5e9;
+  --bd-text: #18191c;
+  --bd-text-2: #61666d;
+  --bd-text-3: #9499a0;
+  --bd-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+  --bd-shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.14);
+  --bd-ok: #2fac4b;
+  --bd-warn: #ff9800;
+  --bd-err: #f04b4b;
+
+  --bd-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  --bd-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bd-bg: #17181a;
+    --bd-surface: #202124;
+    --bd-surface-2: #2a2b2f;
+    --bd-border: #35373b;
+    --bd-text: #e8eaed;
+    --bd-text-2: #a8adb5;
+    --bd-text-3: #7c8189;
+    --bd-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+    --bd-shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.55);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--bd-font);
+  font-size: 13px;
+  color: var(--bd-text);
+  background: var(--bd-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+}
+
+.bd-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--bd-border);
+  border-radius: var(--bd-radius-sm);
+  background: var(--bd-surface);
+  color: var(--bd-text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease, opacity 0.15s ease;
+  white-space: nowrap;
+}
+
+.bd-btn:hover:not(:disabled) {
+  border-color: var(--bd-pink);
+  color: var(--bd-pink);
+}
+
+.bd-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.bd-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bd-btn--primary {
+  background: linear-gradient(135deg, var(--bd-pink), var(--bd-pink-dark));
+  border-color: transparent;
+  color: #fff;
+}
+
+.bd-btn--primary:hover:not(:disabled) {
+  color: #fff;
+  filter: brightness(1.06);
+}
+
+.bd-btn--blue {
+  background: var(--bd-blue);
+  border-color: transparent;
+  color: #fff;
+}
+
+.bd-btn--blue:hover:not(:disabled) {
+  color: #fff;
+  background: var(--bd-blue-dark);
+}
+
+.bd-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--bd-text-2);
+}
+
+.bd-btn--ghost:hover:not(:disabled) {
+  background: var(--bd-surface-2);
+  color: var(--bd-text);
+}
+
+.bd-btn--danger:hover:not(:disabled) {
+  border-color: var(--bd-err);
+  color: var(--bd-err);
+}
+
+.bd-btn--sm {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.bd-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bd-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--bd-text-2);
+}
+
+.bd-hint {
+  font-size: 11px;
+  color: var(--bd-text-3);
+  line-height: 1.6;
+}
+
+.bd-input,
+.bd-select {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--bd-border);
+  border-radius: var(--bd-radius-sm);
+  background: var(--bd-surface);
+  color: var(--bd-text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.bd-input:focus,
+.bd-select:focus {
+  border-color: var(--bd-blue);
+  box-shadow: 0 0 0 3px rgba(0, 161, 214, 0.14);
+}
+
+.bd-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+}
+
+.bd-switch input {
+  appearance: none;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--bd-border);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.18s ease;
+  flex: none;
+  margin: 0;
+}
+
+.bd-switch input::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.18s ease;
+}
+
+.bd-switch input:checked {
+  background: var(--bd-pink);
+}
+
+.bd-switch input:checked::after {
+  transform: translateX(16px);
+}
+
+.bd-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--bd-surface-2);
+  color: var(--bd-text-2);
+  white-space: nowrap;
+}
+
+.bd-badge--pink {
+  background: rgba(251, 114, 153, 0.14);
+  color: var(--bd-pink-dark);
+}
+
+.bd-badge--blue {
+  background: rgba(0, 161, 214, 0.14);
+  color: var(--bd-blue-dark);
+}
+
+.bd-badge--ok {
+  background: rgba(47, 172, 75, 0.14);
+  color: var(--bd-ok);
+}
+
+.bd-badge--warn {
+  background: rgba(255, 152, 0, 0.16);
+  color: #c77700;
+}
+
+.bd-badge--err {
+  background: rgba(240, 75, 75, 0.14);
+  color: var(--bd-err);
+}
+
+.bd-progress {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bd-surface-2);
+  overflow: hidden;
+}
+
+.bd-progress > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--bd-blue), var(--bd-pink));
+  transition: width 0.25s ease;
+}
+
+.bd-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.bd-scroll::-webkit-scrollbar-thumb {
+  background: var(--bd-border);
+  border-radius: 4px;
+}
+
+.bd-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.bd-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--bd-text-3);
+  font-size: 12px;
+  line-height: 1.8;
+}
+
+.bd-spin {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--bd-border);
+  border-top-color: var(--bd-pink);
+  border-radius: 50%;
+  animation: bd-rotate 0.7s linear infinite;
+  flex: none;
+}
+
+@keyframes bd-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.bd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bd-grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.bd-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

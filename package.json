@@ -1,0 +1,12 @@
+{
+  "name": "bdown",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bdown - B站视频下载助手（Microsoft Edge / Chrome MV3 扩展）",
+  "type": "module",
+  "scripts": {
+    "validate": "node tools/validate.mjs",
+    "mux-test": "node tools/mux-test.mjs"
+  },
+  "license": "MIT"
+}

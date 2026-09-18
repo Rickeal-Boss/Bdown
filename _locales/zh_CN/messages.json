@@ -1,0 +1,10 @@
+{
+  "extName": {
+    "message": "Bdown - B站视频下载助手",
+    "description": "扩展名称"
+  },
+  "extDesc": {
+    "message": "一键解析并下载哔哩哔哩视频：支持 8K / 4K / HDR / 杜比视界 / Hi-Res 音轨、多P与合集批量、弹幕与字幕导出、音视频无损合并。",
+    "description": "扩展描述"
+  }
+}

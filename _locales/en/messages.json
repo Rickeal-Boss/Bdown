@@ -1,0 +1,10 @@
+{
+  "extName": {
+    "message": "Bdown - Bilibili Video Downloader",
+    "description": "Extension name"
+  },
+  "extDesc": {
+    "message": "Parse and download Bilibili videos: 8K / 4K / HDR / Dolby Vision / Hi-Res audio, multi-part and collection batch download, danmaku and subtitle export, lossless audio-video merge.",
+    "description": "Extension description"
+  }
+}

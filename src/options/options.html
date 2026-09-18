@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Bdown 设置</title>
+  <link rel="stylesheet" href="../ui/common.css" />
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="page-head">
+      <div class="brand">
+        <span class="logo">B</span>
+        <div>
+          <h1>Bdown 设置</h1>
+          <p class="bd-hint">B 站视频下载助手 · 所有设置保存在本地，不会上传</p>
+        </div>
+      </div>
+      <div class="head-right">
+        <span id="accountBadge" class="bd-badge">读取中…</span>
+        <button id="btnReset" class="bd-btn bd-btn--danger bd-btn--sm">恢复默认</button>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>文件命名</h2>
+      <div class="grid">
+        <label class="bd-field">
+          <span class="bd-label">单 P 视频文件名</span>
+          <input class="bd-input" data-key="singleNameTemplate" />
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">多 P / 合集文件名</span>
+          <input class="bd-input" data-key="batchNameTemplate" />
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">清晰度后缀（勾选后才拼接）</span>
+          <input class="bd-input" data-key="qualitySuffix" />
+        </label>
+        <label class="bd-switch field-inline">
+          <input type="checkbox" data-key="nameWithQuality" />
+          <span>在文件名中附带清晰度</span>
+        </label>
+      </div>
+      <p class="bd-hint">
+        可用变量：<code>{title}</code> 标题、<code>{part}</code> 分P标题、<code>{n}</code> 序号、
+        <code>{p}</code> 分P号、<code>{bvid}</code>、<code>{aid}</code>、<code>{cid}</code>、
+        <code>{user}</code> UP主、<code>{userID}</code>、<code>{qualityShort}</code> 清晰度简称、
+        <code>{codec}</code>、<code>{year}</code> <code>{month}</code> <code>{day}</code>
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>下载</h2>
+      <div class="grid">
+        <label class="bd-field">
+          <span class="bd-label">下载方式</span>
+          <select class="bd-select" data-key="downloadMode">
+            <option value="merge">合并为单个 MP4（推荐）</option>
+            <option value="separate">音视频分离文件</option>
+            <option value="durl">单文件直下（清晰度受限）</option>
+          </select>
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">默认清晰度</span>
+          <select class="bd-select" data-key="defaultQuality"></select>
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">编码偏好</span>
+          <select class="bd-select" data-key="preferCodec">
+            <option value="avc">AVC / H.264（兼容性最好）</option>
+            <option value="hevc">HEVC / H.265（体积更小）</option>
+            <option value="av1">AV1（体积最小）</option>
+          </select>
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">音轨偏好</span>
+          <select class="bd-select" data-key="audioPreference">
+            <option value="best">优先无损 / 杜比，其次最高码率</option>
+            <option value="normal">普通音轨（最高码率）</option>
+          </select>
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">并发分片数（1–16）</span>
+          <input class="bd-input" type="number" min="1" max="16" data-key="concurrency" data-type="number" />
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">同时下载的任务数</span>
+          <input class="bd-input" type="number" min="1" max="8" data-key="maxParallelTasks" data-type="number" />
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">保存方式</span>
+          <select class="bd-select" data-key="saveMode">
+            <option value="ask">每次询问保存位置</option>
+            <option value="downloads">浏览器默认下载目录</option>
+          </select>
+        </label>
+      </div>
+      <p class="bd-hint">并发分片过高容易被 CDN 限速，建议保持 8；如遇失败可降到 4 或 2。</p>
+    </section>
+
+    <section class="card">
+      <h2>附加内容</h2>
+      <div class="grid">
+        <label class="bd-switch field-inline"><input type="checkbox" data-key="saveDanmaku" /><span>保存弹幕</span></label>
+        <label class="bd-switch field-inline"><input type="checkbox" data-key="saveSubtitle" /><span>保存字幕</span></label>
+        <label class="bd-switch field-inline"><input type="checkbox" data-key="saveCover" /><span>保存封面</span></label>
+        <label class="bd-field">
+          <span class="bd-label">弹幕格式</span>
+          <select class="bd-select" data-key="danmakuFormat">
+            <option value="ass">ASS 字幕（可拖动进度条观看）</option>
+            <option value="xml">原始 XML</option>
+            <option value="srt">SRT</option>
+            <option value="txt">纯文本</option>
+          </select>
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">字幕格式</span>
+          <select class="bd-select" data-key="subtitleFormat">
+            <option value="srt">SRT</option>
+            <option value="ass">ASS</option>
+            <option value="txt">纯文本</option>
+          </select>
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">字幕语言偏好</span>
+          <input class="bd-input" data-key="subtitleLan" placeholder="zh-CN" />
+        </label>
+      </div>
+      <p class="bd-hint">字幕多为 AI 生成，需要浏览器已登录 B 站才能取到。</p>
+    </section>
+
+    <section class="card">
+      <h2>弹幕 ASS 渲染</h2>
+      <div class="grid">
+        <label class="bd-field">
+          <span class="bd-label">不透明度（0.1 – 1）</span>
+          <input class="bd-input" type="number" step="0.05" min="0.1" max="1" data-key="danmakuOpacity" data-type="number" />
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">字号缩放（0.5 – 2）</span>
+          <input class="bd-input" type="number" step="0.1" min="0.5" max="2" data-key="danmakuFontScale" data-type="number" />
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">字体</span>
+          <input class="bd-input" data-key="danmakuFontName" />
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">画布宽 × 高</span>
+          <div class="bd-row">
+            <input class="bd-input" type="number" data-key="danmakuWidth" data-type="number" />
+            <input class="bd-input" type="number" data-key="danmakuHeight" data-type="number" />
+          </div>
+        </label>
+      </div>
+      <p class="bd-hint">画布尺寸应与视频分辨率一致（如 1920×1080、3840×2160），否则弹幕会错位。</p>
+    </section>
+
+    <section class="card">
+      <h2>界面</h2>
+      <div class="grid">
+        <label class="bd-switch field-inline"><input type="checkbox" data-key="showFloatingButton" /><span>视频页右下角悬浮按钮</span></label>
+        <label class="bd-switch field-inline"><input type="checkbox" data-key="showPlayerButton" /><span>播放器控制栏按钮</span></label>
+        <label class="bd-switch field-inline"><input type="checkbox" data-key="notifyOnComplete" /><span>下载完成提示</span></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>关于</h2>
+      <p class="bd-hint" style="line-height:1.9">
+        Bdown 是开源的 Edge / Chrome 扩展，基于 B 站公开 Web 接口实现解析与下载。<br />
+        技术要点：WBI 签名（MD5）、DASH 多轨获取、Range 分片并发下载、纯 JS 的 fragmented MP4
+        无损混流、弹幕 XML → ASS 车道排布。<br />
+        请仅用于下载你有权保存的内容，并遵守 B 站用户协议。请勿短时间内大量下载，以免触发风控。<br />
+        项目地址：<a href="https://github.com/Rickeal-Boss/Bdown" target="_blank" rel="noreferrer">github.com/Rickeal-Boss/Bdown</a>
+      </p>
+    </section>
+
+    <div id="toast" class="toast" hidden></div>
+  </div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

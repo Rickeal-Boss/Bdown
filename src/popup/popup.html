@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Bdown</title>
+  <link rel="stylesheet" href="../ui/common.css" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="head">
+    <div class="brand">
+      <span class="logo">B</span>
+      <div>
+        <div class="brand-name">Bdown</div>
+        <div class="brand-sub">B站视频下载助手</div>
+      </div>
+    </div>
+    <div class="head-actions">
+      <span id="loginBadge" class="bd-badge" title="登录状态">检查中…</span>
+      <button id="btnSettings" class="bd-btn bd-btn--ghost bd-btn--sm" title="设置">设置</button>
+    </div>
+  </header>
+
+  <main id="main" class="bd-scroll">
+    <div id="loading" class="state">
+      <span class="bd-spin"></span>
+      <span>正在解析当前页面…</span>
+    </div>
+
+    <div id="notVideo" class="state state--empty" hidden>
+      <div class="empty-icon">🎬</div>
+      <div>当前页面不是 B 站视频页</div>
+      <div class="bd-hint">打开一个 <code>www.bilibili.com/video/BV…</code> 页面，或把 BV 号 / 链接粘贴到下面</div>
+      <div class="bd-row" style="margin-top:10px">
+        <input id="manualInput" class="bd-input" placeholder="粘贴视频链接或 BV 号" />
+        <button id="btnManual" class="bd-btn bd-btn--primary bd-btn--sm">解析</button>
+      </div>
+    </div>
+
+    <div id="error" class="state state--empty" hidden>
+      <div class="empty-icon">⚠️</div>
+      <div id="errorText"></div>
+      <button id="btnRetry" class="bd-btn bd-btn--sm" style="margin-top:10px">重试</button>
+    </div>
+
+    <section id="content" hidden>
+      <div class="video-card">
+        <img id="cover" class="cover" alt="" />
+        <div class="video-meta">
+          <div id="title" class="title"></div>
+          <div id="subTitle" class="sub"></div>
+          <div id="stats" class="stats"></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <span class="bd-label">清晰度</span>
+          <span id="qualityHint" class="bd-hint"></span>
+        </div>
+        <div id="qualityList" class="quality-list bd-scroll"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <span class="bd-label">下载方式</span>
+        </div>
+        <div id="modeGroup" class="segmented">
+          <label><input type="radio" name="mode" value="merge" /><span>合并为 MP4</span></label>
+          <label><input type="radio" name="mode" value="separate" /><span>音视频分离</span></label>
+          <label><input type="radio" name="mode" value="durl" /><span>单文件直下</span></label>
+        </div>
+        <div id="modeHint" class="bd-hint"></div>
+      </div>
+
+      <div id="pagesSection" class="section" hidden>
+        <div class="section-head">
+          <span class="bd-label">选集 / 分P</span>
+          <div class="bd-row">
+            <button id="btnAllPages" class="bd-btn bd-btn--ghost bd-btn--sm">全选</button>
+            <button id="btnNoPages" class="bd-btn bd-btn--ghost bd-btn--sm">全不选</button>
+          </div>
+        </div>
+        <div id="pagesList" class="pages bd-scroll"></div>
+        <div class="bd-row" style="margin-top:8px">
+          <input id="rangeInput" class="bd-input" placeholder="或输入范围，如 1-3,5" />
+          <button id="btnApplyRange" class="bd-btn bd-btn--sm">应用</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-head"><span class="bd-label">附加内容</span></div>
+        <div class="extras">
+          <label class="bd-switch"><input type="checkbox" id="optDanmaku" /><span>弹幕</span></label>
+          <label class="bd-switch"><input type="checkbox" id="optSubtitle" /><span>字幕</span></label>
+          <label class="bd-switch"><input type="checkbox" id="optCover" /><span>封面</span></label>
+        </div>
+      </div>
+
+      <div id="summary" class="summary"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <button id="btnDashboard" class="bd-btn">下载中心</button>
+    <button id="btnStart" class="bd-btn bd-btn--primary bd-grow" disabled>开始下载</button>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

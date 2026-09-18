@@ -1,0 +1,49 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "Referer",
+          "operation": "set",
+          "value": "https://www.bilibili.com/"
+        },
+        {
+          "header": "User-Agent",
+          "operation": "set",
+          "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0"
+        }
+      ]
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/]*\\.)?(bilivideo\\.com|bilivideo\\.cn|akamaized\\.net|hdslb\\.com|biliapi\\.net)(:\\d+)?/",
+      "resourceTypes": [
+        "xmlhttprequest",
+        "media",
+        "other",
+        "object",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "Referer",
+          "operation": "set",
+          "value": "https://www.bilibili.com/"
+        }
+      ]
+    },
+    "condition": {
+      "regexFilter": "^https?://([^/]*\\.)?(bilivideo\\.com|bilivideo\\.cn|akamaized\\.net|hdslb\\.com|biliapi\\.net)(:\\d+)?/",
+      "resourceTypes": ["image"]
+    }
+  }
+]

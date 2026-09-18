@@ -1,0 +1,24 @@
+# 依赖与构建产物
+node_modules/
+dist/
+*.zip
+*.crx
+*.pem
+
+# 本地调试 / 抓取到的样本
+samples/
+*.m4s
+*.tmp
+bdown-merged.mp4
+
+# 编辑器与系统
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# 不要把个人凭据提交上来
+.env
+*.local.json
