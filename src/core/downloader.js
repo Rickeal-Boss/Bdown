@@ -19,6 +19,19 @@
  */
 
 import { retry, clamp } from './util.js';
+import { missingRanges, completedBytes } from './resume.js';
+
+/**
+ * 允许注入的 fetch。默认用全局 fetch，测试时可替换成假实现，
+ * 避免单测真的打到网络。
+ */
+let injectedFetch = null;
+export function setFetchImpl(fn) {
+  injectedFetch = fn;
+}
+function doFetch(url, init) {
+  return (injectedFetch || globalThis.fetch)(url, init);
+}
 
 const DEFAULT_CONCURRENCY = 8;
 const MIN_CHUNK = 512 * 1024;
@@ -38,7 +51,7 @@ export class DownloadAborted extends Error {
  * @returns {Promise<{ size: number, acceptRanges: boolean, contentType: string }>}
  */
 export async function probeSize(url, { signal, referer } = {}) {
-  const res = await fetch(url, {
+  const res = await doFetch(url, {
     method: 'GET',
     headers: {
       Range: 'bytes=0-0',
@@ -103,6 +116,10 @@ export async function downloadRanged({
   referer = 'https://www.bilibili.com/',
   probe = true,
   onResolvedSize,
+  /** 断点续传：已完成的字节区间 [{start, end})（半开区间）。不传则从零开始。 */
+  resumeRanges = null,
+  /** 注入 fetch 实现，便于测试。不传用全局 fetch。 */
+  fetchImpl = null,
 }) {
   const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
   if (!list.length) throw new Error('没有可用的下载地址');
@@ -128,15 +145,22 @@ export async function downloadRanged({
 
   /* ---------- 2. 切分片 ---------- */
   const chunkSize = clamp(Math.ceil(size / (concurrency * 4)), MIN_CHUNK, MAX_CHUNK);
+  // 断点续传：已完成的区间不必重下，只下载缺失部分（gaps 是半开区间 [start, end)）
+  const doneRanges = Array.isArray(resumeRanges) ? resumeRanges : [];
+  const gaps = doneRanges.length ? missingRanges(size, doneRanges) : [{ start: 0, end: size }];
   const ranges = [];
-  for (let start = 0; start < size; start += chunkSize) {
-    ranges.push({ start, end: Math.min(size, start + chunkSize) - 1, done: false });
+  for (const g of gaps) {
+    for (let start = g.start; start < g.end; start += chunkSize) {
+      // HTTP Range 是闭区间，故 end 要 -1
+      ranges.push({ start, end: Math.min(g.end, start + chunkSize) - 1, done: false });
+    }
   }
 
   const startedAt = performance.now();
-  let downloaded = 0;
+  // 续传时把已下字节计入进度，但不计入瞬时速度（否则首 tick 会虚高）
+  let downloaded = doneRanges.length ? completedBytes(doneRanges) : 0;
   let lastTick = startedAt;
-  let lastBytes = 0;
+  let lastBytes = downloaded;
   let speed = 0;
   let cursor = 0;
 
@@ -173,7 +197,7 @@ export async function downloadRanged({
    * 由调用方用真实大小修正进度即可。
    */
   const fetchRange = async (url, range, workerSignal) => {
-    const res = await fetch(url, {
+    const res = await doFetch(url, {
       headers: {
         Range: `bytes=${range.start}-${range.end}`,
         Referer: referer,
@@ -267,7 +291,7 @@ export async function downloadSequential({
   let lastError;
   for (const url of list) {
     try {
-      const res = await fetch(url, {
+      const res = await doFetch(url, {
         headers: { Referer: referer },
         credentials: 'omit',
         cache: 'no-store',

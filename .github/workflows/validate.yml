@@ -25,6 +25,9 @@ jobs:
       - name: api.get 本地预校验自检（防止无 bvid/avid/ep_id 请求触发 -400）
         run: node tools/test-api-validation.mjs
 
+      - name: 断点续传逻辑自检（区间合并 / 缺失计算 / 续传集成）
+        run: node tools/test-resume.mjs
+
       - name: 用合成 m4s 跑一遍混流器自检
         run: node tools/selftest-synthetic.mjs
 

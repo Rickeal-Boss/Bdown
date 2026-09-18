@@ -22,20 +22,42 @@ export class MemorySink {
     this.size = 0;
   }
 
+  /**
+   * @param {number} offset
+   * @param {Uint8Array} bytes
+   */
   async writeAt(offset, bytes) {
-    this.records.push({ offset, bytes });
-    this.size = Math.max(this.size, offset + bytes.length);
+    // 入参防御：调用方传错（如把 offset 当 bytes 传）不该静默产出坏文件。
+    // 曾因此出现 `bytes` 是数字 0、size 变 NaN、最终产物多出 1 字节的怪象。
+    const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(0);
+    const at = Number.isFinite(Number(offset)) ? Number(offset) : 0;
+    this.records.push({ offset: at, bytes: data });
+    this.size = Math.max(this.size || 0, at + data.length);
   }
 
+  /** 顺序追加（不支持断点续传的旧路径；续传请用 writeAt 指定偏移）。 */
   async write(bytes) {
-    return this.writeAt(this.size, bytes);
+    return this.writeAt(this.size || 0, bytes);
   }
 
   async close() {}
 
+  /**
+   * 按 offset 拼装完整内容。
+   *
+   * 不能简单 `sorted.map(r => r.bytes)` 拼接：断点续传会让写入顺序与偏移
+   * 不一致，而且可能存在空洞（未下载的区间）与重叠（重试同一分片）。
+   * 这里按最终 size 建缓冲区，逐条写入（后写覆盖先写），未覆盖处补 0。
+   */
   blob(type = 'application/octet-stream') {
+    if (!this.records.length || !this.size) return new Blob([], { type });
+    const out = new Uint8Array(this.size);
     const sorted = [...this.records].sort((a, b) => a.offset - b.offset);
-    return new Blob(sorted.map((r) => r.bytes), { type });
+    for (const r of sorted) {
+      if (r.offset < 0 || r.offset + r.bytes.length > out.length) continue;
+      out.set(r.bytes, r.offset);
+    }
+    return new Blob([out], { type });
   }
 }
 
