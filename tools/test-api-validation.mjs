@@ -1,0 +1,106 @@
+/**
+ * api.get 本地预校验自检（不联网）。
+ *
+ * 防止「请求缺少 bvid/avid/ep_id」悄悄打到 B 站 → B 站返回 code=-400
+ * 「请求错误」，本脚本用假 fetchImpl 验证：
+ *   - 无 id 时必须本地抛 BiliError(-400) 且 fetchImpl 未被调用
+ *   - 有 bvid 时必须放行到 fetchImpl
+ *   - 有 ep_id 时（番剧路径）也必须放行
+ *
+ * 运行：node tools/test-api-validation.mjs
+ */
+import { BiliApi } from '../src/core/api.js';
+
+let pass = 0;
+let fail = 0;
+
+function ok(name, cond, msg = '') {
+  if (cond) {
+    pass += 1;
+    console.log('  \u2713 ' + name);
+  } else {
+    fail += 1;
+    console.log('  \u2717 ' + name + ' — ' + msg);
+  }
+}
+
+function makeFetchMock(opts = {}) {
+  const { code = 0, withNav = true } = opts;
+  const calls = [];
+  const fn = async (url) => {
+    calls.push(url);
+    // nav 接口需要返回 wbi_img，否则 getMixinKey 抛错
+    if (withNav && /web-interface\/nav/.test(url)) {
+      return new Response(JSON.stringify({
+        code: 0,
+        data: {
+          wbi_img: {
+            img_url: 'https://i0.hdslb.com/bfs/wbi/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png',
+            sub_url: 'https://i0.hdslb.com/bfs/wbi/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png',
+          },
+        },
+      }), { headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ code, data: {}, message: 'OK' }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  return { fn, calls };
+}
+
+async function main() {
+  // 场景 1：缺所有 id → 本地拦截
+  {
+    const { fn, calls } = makeFetchMock();
+    const api = new BiliApi({ fetchImpl: fn });
+    let err = null;
+    try {
+      await api.get('/x/player/wbi/playurl', { params: { cid: 1, qn: 80, fnval: 4048 }, signed: true });
+    } catch (e) { err = e; }
+    ok('无任何视频标识 → 本地抛 -400，不发请求',
+      err && err.code === -400 && /bvid|avid|ep_id/.test(err.message) && calls.length === 0,
+      'err=' + (err && err.message) + ' calls=' + calls.length);
+  }
+
+  // 场景 2：有 bvid → 放行
+  {
+    const { fn, calls } = makeFetchMock(0);
+    const api = new BiliApi({ fetchImpl: fn });
+    await api.get('/x/player/wbi/playurl', {
+      params: { bvid: 'BV1xx411c7mD', cid: 62131, qn: 80, fnval: 4048 },
+      signed: true,
+    });
+    ok('有 bvid → 正常发请求', calls.length >= 1, 'calls=' + calls.length);
+  }
+
+  // 场景 3：只 ep_id（番剧路径）→ 放行
+  {
+    const { fn, calls } = makeFetchMock(0);
+    const api = new BiliApi({ fetchImpl: fn });
+    await api.get('/pgc/player/web/v2/playurl', {
+      params: { ep_id: 12345, cid: 99999, qn: 80, fnval: 12240 },
+      signed: true,
+    });
+    ok('只 ep_id（番剧路径）也合法', calls.length >= 1, 'calls=' + calls.length);
+  }
+
+  // 场景 4：view 接口（无 signed）也拦 id 缺失
+  {
+    const { fn, calls } = makeFetchMock();
+    const api = new BiliApi({ fetchImpl: fn });
+    let err = null;
+    try {
+      await api.get('/x/web-interface/view', { params: { some: 'thing' }, signed: false });
+    } catch (e) { err = e; }
+    ok('view 接口（不带签名）也本地拦 id 缺失',
+      err && err.code === -400 && calls.length === 0,
+      'err=' + (err && err.message) + ' calls=' + calls.length);
+  }
+
+  console.log('\n' + (fail === 0 ? '\u2705' : '\u274c') + ' api 预校验自检' +
+    (fail === 0 ? '完成，失败 0 项' : '完成，失败 ' + fail + ' 项') +
+    '（通过 ' + pass + '）\n');
+  process.exit(fail === 0 ? 0 : 1);
+}
+
+main();

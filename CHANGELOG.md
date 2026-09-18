@@ -1,3 +1,37 @@
+## [1.1.2] - 2026-09-18
+
+### 修复
+
+- **🔴 用户复现的 -400「请求参数错误」真实根因**：task spec 缺少 bvid / avid / ep_id 时悄悄打到 B 站
+  用户第二次截图用了合法格式的 BV1LAeP64EaM（不含 I，我的 v1.1.1 正则过宽修正帮不上），但我之前没找到真因。真机对 4 种参数组合穷举后定位：
+  ```
+  bvid+avid+qn+fnval            | code: 0
+  try_look=1                    | code: 0
+  avid=117280994297713（大 aid） | code: 0
+  bvid + avid 同时              | code: 0
+  无 bvid/avid                   | code: -400「请求错误」
+  ```
+  也就是说只要请求里没有任何视频标识，B 站就返回 -400。
+
+  在浏览器场景里触发这条的具体路径：popup.js 构建 spec 时 info.bvid 可能是空串（部分番剧没有 bvid、或 title 字段异常），task 照样被加进队列，引擎收到空 spec → 调 api.playurl({bvid: '', aid: undefined, epId: undefined, ...}) → if (bvid) ... else if (aid) 两边都空 → 请求里没有 bvid/avid/ep_id → -400。
+
+- **api.get 本地预校验**：调 playurl/view 类接口时，先检查 params 是否含 bvid/avid/ep_id/season_id 中任一标识。空则直接抛 BiliError(-400, '请求缺少视频标识（bvid / avid / ep_id），任务规格可能不完整', url)，不发请求。
+- **BiliError 自定义 message 优先**：原实现里 ERROR_MESSAGES[-400] = '请求参数错误' 会覆盖自定义 message；改为「传入 message 则用 message」，避免本地主动抛的具体提示被默认文案掩盖。
+- **headers 增强**：用桌面浏览器 UA（Edg/126.0.0.0）+ Origin: https://www.bilibili.com 替代浏览器默认 UA。证据：stevenjoezhang/bilibili-downloader 与 wu529778790/parse.shenzjd.com 的 WBI 实现都显式设置这三件套，避免被 B 站来源校验拒。
+
+### 新增
+
+- tools/test-api-validation.mjs：4 项预校验自检（无 id 拦截、有 bvid 放行、只 ep_id 放行、view 接口也拦截）。已接入 CI。
+
+### 测试
+
+- selftest-core.mjs 57 项 + test-api-validation.mjs 4 项 = 61 项核心自检，全部 CI 可运行、不联网。
+
+### 未完成（待用户确认）
+
+- 真实任务规格何时会出现 bvid/avid/ep_id 都缺？需要在 popup / dashboard 加更友好的提示「该视频缺少标识，请重新打开视频页面或重试」——下次类似问题可一次锁定。
+- bilibili-API-collect 的 fnval 官方位定义仍是 404，8192 位的语义靠 yt-dlp 间接证据，未直接证实。
+
 # 更新日志
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。

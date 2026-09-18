@@ -17,6 +17,26 @@ import { retry, log, warn } from './util.js';
 const API = 'https://api.bilibili.com';
 const REFERER = 'https://www.bilibili.com/';
 
+/**
+ * 浏览器原生 fetch 在扩展页面调用时只自动加 `Referer`（取决于调用方式），
+ * UA 也只会是 Chrome 自己的。B 站近年的风控对扩展来源 UA（无 Edg/Chrome 字样 +
+ * 无 Origin）的请求直接返回 code=-400，症状是「请求参数错误」——但实际是服务器
+ * 端的来源校验，不是参数问题。
+ *
+ * 参照 `stevenjoezhang/bilibili-downloader` 与 `bilibili-helper-o` 的
+ * fetch headers：显式设置桌面浏览器 UA、Origin、Referer。
+ *
+ * ——证据：本机 curl / Node fetch 怎么发都 code:0；浏览器扩展场景下 -400。
+ */
+const COMMON_HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0',
+  Referer: REFERER,
+  Origin: 'https://www.bilibili.com',
+  Accept: 'application/json, text/plain, */*',
+  'Accept-Language': 'zh-CN,zh;q=0.9',
+};
+
 /** fnval 位掩码：DASH + HDR + 4K + 杜比音频 + 杜比视界 + 8K + AV1 */
 export const FNVAL_DASH = 16 | 64 | 128 | 256 | 512 | 1024 | 2048; // = 4048
 /** 番剧接口额外需要的位（yt-dlp 用 12240 = 4048 | 8192）。 */
@@ -40,8 +60,11 @@ const ERROR_MESSAGES = {
 
 export class BiliError extends Error {
   constructor(code, message, url) {
-    const friendly = ERROR_MESSAGES[String(code)];
-    super(friendly ? `${friendly}（code ${code}）` : message || `接口错误 code=${code}`);
+    // 自定义 message 优先；只有在没给 message 时才回退到 ERROR_MESSAGES 表
+    // —— 否则本地主动抛的「请求缺少 bvid」类提示会被 -400 的「请求参数错误」
+    // 默认文案覆盖，掩盖真实原因。
+    const friendly = message || ERROR_MESSAGES[String(code)];
+    super(friendly ? `${friendly}（code ${code}）` : `接口错误 code=${code}`);
     this.name = 'BiliError';
     this.code = code;
     this.url = url;
@@ -62,6 +85,19 @@ export class BiliApi {
   /** 底层 GET：自动加 Referer、带 cookie、解析 JSON、检查 code。 */
   async get(pathOrUrl, { params, signed = false, raw = false, timeout = 20000, needLogin = false } = {}) {
     const url = new URL(pathOrUrl.startsWith('http') ? pathOrUrl : API + pathOrUrl);
+    if (params && /playurl|view/.test(url.pathname)) {
+      // 服务端对「没有任何视频标识（bvid/avid/ep_id/season_id）」的请求会返回
+      // code=-400「请求错误」——这条信息会走 ERROR_MESSAGES 表被翻译成
+      // 「请求参数错误」掩盖根因。本地先拦下，给具体提示（与 view 接口是否签名无关）。
+      const idKeys = Object.keys(params).filter((k) => ['bvid', 'avid', 'ep_id', 'season_id'].includes(k));
+      if (!idKeys.length) {
+        throw new BiliError(
+          -400,
+          '请求缺少视频标识（bvid / avid / ep_id），任务规格可能不完整',
+          url.toString(),
+        );
+      }
+    }
     let query = '';
     if (params) {
       if (signed) {
@@ -85,11 +121,7 @@ export class BiliApi {
         credentials: 'include',
         cache: 'no-store',
         signal: controller.signal,
-        headers: {
-          Referer: REFERER,
-          Origin: 'https://www.bilibili.com',
-          Accept: 'application/json, text/plain, */*',
-        },
+        headers: COMMON_HEADERS,
       });
     } finally {
       clearTimeout(timer);

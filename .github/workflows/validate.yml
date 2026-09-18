@@ -22,6 +22,9 @@ jobs:
       - name: 核心模块自检（XSS / urlencode / md5 / av-bv / 文件名安全）
         run: node tools/selftest-core.mjs
 
+      - name: api.get 本地预校验自检（防止无 bvid/avid/ep_id 请求触发 -400）
+        run: node tools/test-api-validation.mjs
+
       - name: 用合成 m4s 跑一遍混流器自检
         run: node tools/selftest-synthetic.mjs
 
