@@ -280,6 +280,17 @@ export class BiliApi {
     else if (aid) params.avid = aid;
     if (!logged) params.try_look = 1;
 
+    // cid 是 playurl 的必填项。缺了它 B 站返回 code=-400「请求错误」，
+    // 与「BV 不存在」返回的是同一个错误码，极难分辨——所以本地先说清楚。
+    if (!cid) {
+      throw new BiliError(
+        -400,
+        '任务缺少 cid（分P 标识），无法请求播放地址。请回到视频页面重新点一次「下载」，' +
+          '或在下载中心删除该任务后重新添加。',
+        `${API}${epId ? '/pgc/player/web/v2/playurl' : '/x/player/wbi/playurl'}?bvid=${bvid || ''}`,
+      );
+    }
+
     const path = epId
       ? '/pgc/player/web/v2/playurl'
       : '/x/player/wbi/playurl';

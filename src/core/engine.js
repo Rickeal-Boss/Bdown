@@ -140,9 +140,20 @@ export class DownloadEngine {
     try {
       if (task.canceled) throw new DownloadAborted();
 
+      /* ---------------- 0. 补齐任务规格 ---------------- */
+      // content script 的悬浮按钮 / 播放器按钮只做 URL 解析，给出的 spec 是
+      // `{ bvid, pageIndex }`，**没有 cid**。而 /x/player/wbi/playurl 缺 cid
+      // 时返回 code=-400「请求错误」（实测：有 bvid 无 cid → -400；cid 为空
+      // 或 "undefined" 同样 -400）。所以运行前必须先用 view 接口把 cid 补上。
+      const spec = task.spec;
+      await ensureSpecComplete(spec, api, () => task.canceled);
+      if (!task.title || task.title === spec.bvid) {
+        task.title = spec.title || spec.info?.title || spec.bvid || '视频任务';
+        this.emit(task);
+      }
+
       /* ---------------- 1. 解析播放地址 ---------------- */
       setStatus('resolving', '解析播放地址…');
-      const spec = task.spec;
       const playInfo = await api.playurl({
         bvid: spec.bvid,
         aid: spec.aid,
@@ -616,6 +627,58 @@ async function streamInto(writable, blob) {
     if (done) break;
     await writable.write(value);
   }
+}
+
+
+/**
+ * 补齐任务规格里缺失的 cid / 标题 / 分P 信息。
+ *
+ * 必要性（实测证据）：
+ *   bvid + cid=39386548303 → code:0
+ *   bvid + cid=1（不匹配） → code:-404「啥都木有」
+ *   bvid + 完全无 cid      → code:-400「请求错误」
+ *   bvid + cid="undefined" → code:-400「请求错误」
+ *
+ * content script 的悬浮按钮 / 播放器按钮只解析 URL，给出的 spec 没有 cid，
+ * 直接拿去调 playurl 就一定 -400。这里统一用 /x/web-interface/view 补上。
+ *
+ * @param {object} spec 任务规格（原地补全）
+ * @param {import('./api.js').BiliApi} api
+ * @param {() => boolean} [isCanceled]
+ */
+export async function ensureSpecComplete(spec, api, isCanceled = () => false) {
+  if (spec.cid) return spec;
+  if (!spec.bvid && !spec.aid) return spec;
+  if (isCanceled()) return spec;
+
+  let info = null;
+  try {
+    info = await api.videoInfo({ bvid: spec.bvid, aid: spec.aid });
+  } catch (err) {
+    warn('补全任务规格失败（拿不到 cid）', err?.message);
+    return spec;
+  }
+  if (!info || isCanceled()) return spec;
+
+  const pages = info.pages || [];
+  const page = pages[spec.pageIndex || 0] || pages[0];
+  const cid = page?.cid || info.cid;
+  if (cid) spec.cid = cid;
+  if (!spec.title && info.title) spec.title = info.title;
+  if (!spec.cover && info.pic) spec.cover = info.pic;
+  if (!spec.totalPages) spec.totalPages = pages.length;
+  if (!spec.info) {
+    spec.info = {
+      title: info.title,
+      bvid: info.bvid,
+      aid: info.aid,
+      pubdate: info.pubdate,
+      owner: info.owner,
+      duration: info.duration,
+      pages,
+    };
+  }
+  return spec;
 }
 
 /**

@@ -1,3 +1,60 @@
+## [1.2.1] - 2026-09-18
+
+### 🔴 找到 -400 的**真正**根因：任务 spec 缺 cid（分P 标识）
+
+前几轮的 Origin/WAF 结论也不完全对——但顺着那条线做实测穷举，终于摸到真因。
+用 curl 对 `BV16s7b68EEz` 穷举 cid 取值：
+
+```
+bvid + cid=39386548303（正确） → code:0
+bvid + cid=1（存在但不匹配）   → code:-404「啥都木有」
+bvid + cid=（空）              → code:-400「请求错误」  ← 用户报的错
+bvid + 完全没有 cid             → code:-400「请求错误」  ← 用户报的错
+bvid + cid=undefined（字符串）  → code:-400「请求错误」
+```
+
+**B 站对「缺 cid」和「BV 不存在」返回的是同一个 -400**，所以之前无论怎么改
+错误信息都指向错误方向。
+
+**cid 为什么会丢**：`src/content/content.js:113` 的悬浮按钮 / 播放器按钮
+只做 URL 解析：
+
+```js
+const spec = parseVideoFromUrl(location.href);   // → { bvid, pageIndex }
+chrome.runtime.sendMessage({ type: 'OPEN_DASHBOARD',
+  payload: { tasks: [{ ...spec, sourceUrl, isBatch: false }] } });
+```
+
+`parseVideoFromUrl` 返回的是 `{ bvid, pageIndex }`，**没有 cid**。这个裸 spec
+直接进队列 → `engine.run` 调 `api.playurl({cid: undefined})` → `signParams`
+遇到 undefined 会 `continue` 跳过 → 请求里根本没有 cid → **-400**。
+
+两个独立信号互相印证：
+1. dashboard 任务标题显示 `BV16s7b68EEz`（兜底逻辑是
+   `spec.title || spec.info?.title || spec.bvid`，说明 spec 连 title/info 都没有）
+2. 接口返 -400（说明 cid 缺失）
+
+### 修复
+
+- **新增 `ensureSpecComplete(spec, api)`（engine.js）**：`engine.run` 在调
+  playurl 前，若 `spec.cid` 缺失且有 bvid/aid，先用 `/x/web-interface/view`
+  把 cid 补上，顺带补齐 title / cover / info.pages / totalPages。
+  已有 cid 时跳过，零额外请求。
+- **`api.playurl` 缺 cid 时本地报错**：不再静默发出没有 cid 的请求，直接抛
+  「任务缺少 cid（分P 标识），无法请求播放地址。请回到视频页面重新点一次下载，
+  或在下载中心删除该任务后重新添加。」
+- **任务标题不再显示 BV 号**：`engine.run` 补完 spec 后同步刷新 `task.title`。
+
+### 测试
+
+- `test-api-validation.mjs` 10 → 16 项（重写了文件，原来场景 8 误落在
+  `process.exit` 之后从未执行）：
+  - playurl 缺 cid → 本地抛错且不打到 playurl
+  - `ensureSpecComplete` 补全 cid / title / info.pages，且已有 cid 时跳过请求
+  - HTTP 412 + HTML → 报「被 B 站风控拦截」并提示 Origin 原因
+  - DNR Origin 规则 4 项
+- **核心自检总计 73 项**（57 + 16），全部不联网。
+
 ## [1.2.0] - 2026-09-18
 
 ### 🔴 找到 -400 的真正根因：B 站 WAF 只放行 Origin 为 bilibili.com 的请求
