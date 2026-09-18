@@ -219,6 +219,7 @@ function render() {
   $('modeHint').textContent = {
     merge: '下载 DASH 音视频后无损合并为单个 MP4（推荐，支持全部清晰度）',
     separate: '分别保存 video.mp4 与 audio.m4a，自行用播放器/ffmpeg 处理',
+    audio: '只下载音轨并保存为 .m4a（B 站音轨本身是 fMP4，直接可播，无需转码）',
     durl: '直接下载单文件 MP4，无需合并；但清晰度上限较低（通常 720P/1080P）',
   }[mode];
 
@@ -377,6 +378,7 @@ function bindEvents() {
       $('modeHint').textContent = {
         merge: '下载 DASH 音视频后无损合并为单个 MP4（推荐，支持全部清晰度）',
         separate: '分别保存 video.mp4 与 audio.m4a，自行用播放器/ffmpeg 处理',
+        audio: '只下载音轨并保存为 .m4a（B 站音轨本身是 fMP4，直接可播，无需转码）',
         durl: '直接下载单文件 MP4，无需合并；但清晰度上限较低（通常 720P/1080P）',
       }[r.value];
       updateSummary();

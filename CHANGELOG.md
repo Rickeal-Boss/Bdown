@@ -2,6 +2,26 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-09-18
+
+### 新增
+
+- **「仅音频」下载模式**（`downloadMode: 'audio'`）
+  此前只有 `merge | separate | durl` 三种，缺竞品标配的纯音频下载。
+  B 站的音轨本身就是 fragmented MP4，直接落盘为 `.m4a` 即可播放，**无需重封装或转码**。
+  popup 与选项页均已加入入口；`buildPlan` 在此模式下不下视频轨，且纯音频投稿（无视频轨）也能正常下载。
+- **`tools/package.mjs`：零依赖打包脚本**
+  手写 ZIP（STORE 方式，不依赖系统 `zip` 命令也不用第三方库），产出
+  `dist/Bdown-v<version>.zip`，自动排除 `tools/ docs/ .github/ samples/ dist/` 等开发内容，
+  打完包回读中央目录自检。CI 里作为 artifact 上传，可直接提交 Edge / Chrome 商店。
+  已用 Python `zipfile` 独立验证：CRC 校验通过、37 个条目、排除规则正确。
+
+### 测试
+
+- `selftest-core.mjs` 新增 `[6] buildPlan 下载方式分支`：merge / audio / durl 三种计划的
+  轨选择与体积计算，含「纯音频投稿不报错」「merge 缺视频轨必须报错」两个边界。
+  自检从 43 项增至 **48 项**。
+
 ## [1.0.1] - 2026-09-18
 
 源码级审查后的加固版本。所有结论均以真实源码比对或独立实现交叉验证为准。

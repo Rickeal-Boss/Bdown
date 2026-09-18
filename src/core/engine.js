@@ -165,7 +165,7 @@ export class DownloadEngine {
       // playurl 不返回 DASH 轨的真实大小（只有按码率估算的值），
       // 这里补一次轻量探测，让进度与预计体积准确。
       setStatus('resolving', '探测文件大小…');
-      await refinePlanSizes(plan, signal);
+      await refinePlanSizes(plan, signal, settings);
       task.totalBytes = plan.totalBytes;
       this.emit(task);
 
@@ -179,6 +179,7 @@ export class DownloadEngine {
       });
 
       const separate = plan.mode === 'dash' && settings.downloadMode === 'separate';
+      const audioOnly = plan.mode === 'dash' && settings.downloadMode === 'audio';
 
       /* ---------------- 2. 下载 ---------------- */
       setStatus('downloading', '下载中…');
@@ -217,6 +218,32 @@ export class DownloadEngine {
           },
         });
         await this.finishOutput(out, task, destination, `${task.filename}.mp4`, 'video/mp4');
+      } else if (audioOnly) {
+        // 仅音频：单路下载，音轨原样落盘为 .m4a
+        const out = await this.createOutput({
+          task,
+          destination,
+          name: `${task.filename}.m4a`,
+          singleOutput: true,
+          sizeHint: plan.audio.size,
+          tempNames,
+        });
+        staging.audio = out.sink;
+        await this.fetchTo({
+          urls: [plan.audio.url, ...plan.audio.backupUrls],
+          size: plan.audio.size,
+          sink: out.sink,
+          signal,
+          onProgress: (p) => {
+            task.speed = p.speed;
+            task.eta = p.eta;
+            refreshProgress();
+          },
+        });
+        if (task.canceled) throw new DownloadAborted();
+
+        setStatus('saving', '保存音频文件…');
+        await this.finishOutput(out, task, destination, `${task.filename}.m4a`, 'audio/mp4');
       } else if (separate) {
         // 音视频分离输出：两路各自落盘
         const vOut = await this.createOutput({
@@ -616,19 +643,24 @@ export function buildPlan(playInfo, settings, spec) {
     quality = lower || accept[accept.length - 1];
   }
 
+  // 「仅音频」模式：不下视频轨，直接把音轨原样落盘（B 站的音轨本身就是
+  // fragmented MP4，改个扩展名为 .m4a 即可直接播放，无需重封装或转码）。
+  const audioOnly = settings.downloadMode === 'audio';
+
   const video = pickVideoTrack(playInfo.videos, quality, settings.preferCodec);
   const audio = pickAudioTrack(playInfo.audios, { preferLossless: settings.audioPreference !== 'normal' });
-  if (!video) throw new Error('该视频没有可用的视频轨');
+  if (!audioOnly && !video) throw new Error('该视频没有可用的视频轨');
   if (!audio) throw new Error('该视频没有可用的音频轨');
 
   return {
     mode: 'dash',
-    quality: video.quality,
-    codec: video.codec,
-    video,
+    quality: audioOnly ? 0 : (video?.quality || quality),
+    codec: audioOnly ? '—' : (video?.codec || ''),
+    video: audioOnly ? null : video,
     audio,
+    audioOnly,
     durl: [],
-    totalBytes: (video.size || 0) + (audio.size || 0),
+    totalBytes: ((audioOnly ? 0 : video?.size) || 0) + (audio.size || 0),
   };
 }
 
@@ -639,7 +671,7 @@ export function buildPlan(playInfo, settings, spec) {
  * `bandwidth × duration / 8` 估算，误差可达数个百分点。估算偏大会让最后一个分片越界，
  * 估算偏小则进度条永远到不了 100%。
  */
-export async function refinePlanSizes(plan, signal) {
+export async function refinePlanSizes(plan, signal, settings = {}) {
   const probe = async (track) => {
     if (!track?.url) return;
     try {
@@ -652,13 +684,15 @@ export async function refinePlanSizes(plan, signal) {
 
   if (plan.mode === 'durl') {
     await Promise.all(plan.durl.map((d) => probe(d)));
+  } else if (plan.audioOnly || settings.downloadMode === 'audio') {
+    await probe(plan.audio);
   } else {
     await Promise.all([probe(plan.video), probe(plan.audio)]);
   }
 
   plan.totalBytes = plan.mode === 'durl'
     ? plan.durl.reduce((n, d) => n + (d.size || 0), 0)
-    : (plan.video?.size || 0) + (plan.audio?.size || 0);
+    : (plan.audioOnly ? 0 : plan.video?.size || 0) + (plan.audio?.size || 0);
   return plan;
 }
 

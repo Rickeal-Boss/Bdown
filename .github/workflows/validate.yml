@@ -42,3 +42,12 @@ jobs:
           else
             echo "无混流产物，跳过"
           fi
+
+      - name: 打包扩展（分发 / 商店提交用）
+        run: node tools/package.mjs --check
+
+      - name: 上传打包产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bdown-extension-v${{ github.run_number }}
+          path: dist/*.zip

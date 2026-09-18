@@ -15,6 +15,7 @@ import { escapeHtml, sanitizeFilename } from '../src/core/util.js';
 import { formUrlEncode } from '../src/core/wbi.js';
 import { md5 } from '../src/core/md5.js';
 import { av2bv, bv2av } from '../src/core/avbv.js';
+import { buildPlan } from '../src/core/engine.js';
 
 let pass = 0;
 let fail = 0;
@@ -126,6 +127,56 @@ check('尾随点空格被去掉', () => eq(sanitizeFilename('title . '), 'title'
 check('超长被截断且不留尾点', () => {
   const out = sanitizeFilename('a'.repeat(500));
   return out.length === 120 && !out.endsWith('.') ? '' : `长度=${out.length} 尾=${out.slice(-1)}`;
+});
+
+console.log('\n[6] buildPlan — 下载方式分支（含「仅音频」）');
+// 最小可用 playInfo 夹具：只填 pickVideoTrack / pickAudioTrack 真正读到的字段
+const mkInfo = () => ({
+  mode: 'dash',
+  quality: 80,
+  acceptQuality: [80, 64, 32],
+  duration: 100,
+  videos: [
+    { quality: 80, codec: 'AVC', codecid: 7, bandwidth: 2000000, url: 'https://v/1', backupUrls: [], size: 1000 },
+  ],
+  audios: [
+    { id: 30280, type: 'aac', quality: 30280, codec: 'MPEG4-AAC', bandwidth: 320000, url: 'https://a/1', backupUrls: [], size: 200 },
+  ],
+  durl: [],
+  raw: {},
+});
+
+check('merge：音视频都下，体积为两者之和', () => {
+  const p = buildPlan(mkInfo(), { downloadMode: 'merge', preferCodec: 'avc', audioPreference: 'best' }, {});
+  return eq([!!p.video, !!p.audio, p.totalBytes], [true, true, 1200]);
+});
+check('audio：不下视频轨，体积只算音轨', () => {
+  const p = buildPlan(mkInfo(), { downloadMode: 'audio', preferCodec: 'avc', audioPreference: 'best' }, {});
+  return eq([p.video, p.audioOnly, p.totalBytes], [null, true, 200]);
+});
+check('audio：无视频轨也不报错（纯音频投稿）', () => {
+  const info = mkInfo();
+  info.videos = [];
+  const p = buildPlan(info, { downloadMode: 'audio', preferCodec: 'avc', audioPreference: 'best' }, {});
+  return eq([!!p.audio, p.totalBytes], [true, 200]);
+});
+check('merge：无视频轨必须报错', () => {
+  const info = mkInfo();
+  info.videos = [];
+  let threw = false;
+  try {
+    buildPlan(info, { downloadMode: 'merge', preferCodec: 'avc', audioPreference: 'best' }, {});
+  } catch {
+    threw = true;
+  }
+  return threw ? '' : '应当抛「该视频没有可用的视频轨」但没有';
+});
+check('durl：走单文件计划', () => {
+  const info = mkInfo();
+  info.mode = 'durl';
+  info.durl = [{ url: 'https://d/1', backupUrls: [], size: 999 }];
+  const p = buildPlan(info, { downloadMode: 'durl' }, {});
+  return eq([p.mode, p.totalBytes], ['durl', 999]);
 });
 
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 核心自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);

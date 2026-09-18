@@ -22,7 +22,7 @@ export const DEFAULT_SETTINGS = {
   audioPreference: 'best',
 
   /** 下载方式 */
-  downloadMode: 'merge', // merge | separate | durl
+  downloadMode: 'merge', // merge | separate | audio | durl
   /** 并发分片数 */
   concurrency: 8,
   /** 失败重试次数 */
