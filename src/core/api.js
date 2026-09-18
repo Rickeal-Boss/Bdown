@@ -146,6 +146,29 @@ export class BiliApi {
       if (needLogin && json.code === -101) {
         throw new BiliError(json.code, '该清晰度需要登录后才能获取', url.toString());
       }
+      // B 站返回的 -400 文案很泛（"请求错误" / "请求参数错误"），用户看不出
+      // 是客户端没填 id、还是 BVID 本身不存在。下面按常见情形给出具体诊断。
+      // 完整请求 URL 已放在 error.url 里，方便到 chrome://extensions 的
+      // service worker console 里查具体发了什么参数。
+      if (json.code === -400) {
+        const idKeys = Object.keys(params || {}).filter((k) => ['bvid', 'avid', 'ep_id', 'season_id'].includes(k));
+        const ids = Object.entries(params || {}).filter(([k]) => idKeys.includes(k)).map(([k, v]) => `${k}=${v}`);
+        // 注：上一步本地预校验已经把「id 全缺」拦下了；到这里说明 id 已传，但 B 站仍返 -400
+        if (ids.length === 0) {
+          throw new BiliError(
+            -400,
+            '请求缺少视频标识（bvid / avid / ep_id），任务规格可能不完整',
+            url.toString(),
+          );
+        }
+        // id 已传 → 大概率是 BVID/AVID 在 B 站不存在 / 已删除 / 风控
+        throw new BiliError(
+          -400,
+          `B 站返回「请求错误」，很可能 ${ids.join(' / ')} 在 B 站不存在或已被删除；` +
+            `也可能是当前网络对 api.bilibili.com 被拦截。请到控制台查看完整 URL。`,
+          url.toString(),
+        );
+      }
       throw new BiliError(json.code, json.message, url.toString());
     }
     return json.data;

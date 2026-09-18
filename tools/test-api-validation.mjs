@@ -97,7 +97,26 @@ async function main() {
       'err=' + (err && err.message) + ' calls=' + calls.length);
   }
 
-  console.log('\n' + (fail === 0 ? '\u2705' : '\u274c') + ' api 预校验自检' +
+  
+  // 场景 5：B 站返 -400 但请求里带 bvid → 给出「BVID 在 B 站不存在」具体诊断
+  {
+    const { fn } = makeFetchMock({ code: -400, message: '请求错误' });
+    const api = new BiliApi({ fetchImpl: fn });
+    let err = null;
+    try {
+      await api.get('/x/player/wbi/playurl', {
+        params: { bvid: 'BV1TeU6aEct', cid: 1, qn: 80, fnval: 4048 },
+        signed: true,
+      });
+    } catch (e) { err = e; }
+    ok(
+      'B 站 -400 + bvid → 消息里点名该 BV 不存在',
+      err && err.code === -400 && /BV1TeU6aEct/.test(err.message) && /不存在/.test(err.message),
+      'msg=' + (err && err.message),
+    );
+  }
+
+console.log('\n' + (fail === 0 ? '\u2705' : '\u274c') + ' api 预校验自检' +
     (fail === 0 ? '完成，失败 0 项' : '完成，失败 ' + fail + ' 项') +
     '（通过 ' + pass + '）\n');
   process.exit(fail === 0 ? 0 : 1);
