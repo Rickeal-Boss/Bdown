@@ -159,7 +159,7 @@ export class DownloadEngine {
         aid: spec.aid,
         cid: spec.cid,
         epId: spec.epId,
-        qn: spec.quality || settings.defaultQuality || 127,
+        qn: spec.quality > 0 ? spec.quality : 0,
         mode: settings.downloadMode === 'durl' ? 'durl' : 'dash',
       });
       if (task.canceled) throw new DownloadAborted();

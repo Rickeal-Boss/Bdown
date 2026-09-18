@@ -197,3 +197,35 @@ async function main() {
 }
 
 main();
+  // 场景 9：engine.run 在 spec.quality=0 时发 qn=0（不再强制 127）
+  {
+    let qnSent = null;
+    const fakeApi = {
+      videoInfo: async () => ({ bvid: 'BV16s7b68EEz', aid: 1, cid: 39386548303, pages: [{ page: 1, cid: 39386548303 }] }),
+      playurl: async (p) => { qnSent = p.qn; return { mode: 'dash', quality: p.qn || 16, videos: [], audios: [], acceptQuality: [p.qn || 16], durl: [] }; },
+    };
+    const { DownloadEngine } = await import('../src/core/engine.js');
+    const { Task } = await import('../src/core/engine.js');
+    const engine = new DownloadEngine({ api: fakeApi, settings: { downloadMode: 'merge', defaultQuality: 0, concurrency: 1, audioPreference: 'best', preferCodec: 'avc', saveMode: 'ask', maxParallelTasks: 1 }, onUpdate: () => {} });
+    const task = new Task({ bvid: 'BV16s7b68EEz' }, {});
+    try { await engine.run(task, {}); } catch (e) {}
+    ok('spec.quality=0（自动）→ engine 发出 qn=0 而不是 127',
+      qnSent === 0, 'qn sent=' + qnSent);
+  }
+
+  // 场景 10：spec.quality=80 时 engine 透传 80
+  {
+    let qnSent = null;
+    const fakeApi = {
+      videoInfo: async () => ({ bvid: 'BV16s7b68EEz', cid: 1, pages: [{ cid: 1 }] }),
+      playurl: async (p) => { qnSent = p.qn; return { mode: 'dash', quality: p.qn, videos: [], audios: [], acceptQuality: [p.qn], durl: [] }; },
+    };
+    const { DownloadEngine, Task } = await import('../src/core/engine.js');
+    const engine = new DownloadEngine({ api: fakeApi, settings: { downloadMode: 'merge', defaultQuality: 0, concurrency: 1, audioPreference: 'best', preferCodec: 'avc', saveMode: 'ask', maxParallelTasks: 1 }, onUpdate: () => {} });
+    const task = new Task({ bvid: 'BV16s7b68EEz', quality: 80 }, {});
+    try { await engine.run(task, {}); } catch (e) {}
+    ok('spec.quality=80 → engine 透传 80',
+      qnSent === 80, 'qn sent=' + qnSent);
+  }
+
+

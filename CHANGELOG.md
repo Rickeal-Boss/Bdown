@@ -1,3 +1,30 @@
+## [1.2.2] - 2026-09-18
+
+### 修复：自动清晰度默认 qn 改为 0（让 B 站按用户权限挑）
+
+用户的反馈：「自动清晰度居然只下载 360P 而不是正在播放的 1080P」。
+
+排查：
+- 用户的视频是 B 站大会员纪录片
+- 扩展 nav 显示 `vip: false`（非大会员）
+- engine.run 旧逻辑：`qn: spec.quality || settings.defaultQuality || 127`，
+  `settings.defaultQuality=127`（VIP 顶级），于是对非大会员用户发了 qn=127
+- B 站对大会员视频 + 非大会员用户 + qn 超过其权限的组合，**降级到 360P 预览**
+- popup 的清晰度选项也只有 360P（标记「需大会员」），自动选了它
+
+修复：
+- `settings.defaultQuality` 从 `127` 改为 `0`（自动 → 让 B 站按用户权限挑最好的）
+- engine.run：`qn: spec.quality > 0 ? spec.quality : 0`（popup 显式选了某清晰度就透传，否则发 0 让 B 站决定）
+
+popup 已经有 `需大会员：720P 高清、1080P 高清…` 提示元素（`qualityHint`），
+不需要再改 UI。
+
+### 测试
+
+- `test-api-validation.mjs` 16 → 18 项：新增 2 项验证 engine.run 在
+  `spec.quality=0` 时发 `qn=0`，在 `spec.quality=80` 时透传 80。
+- 核心自检总计 **75 项**（57 + 18）。
+
 ## [1.2.1] - 2026-09-18
 
 ### 🔴 找到 -400 的**真正**根因：任务 spec 缺 cid（分P 标识）
