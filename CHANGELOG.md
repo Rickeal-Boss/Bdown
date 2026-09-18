@@ -2,6 +2,36 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.1] - 2026-09-18
+
+### 修复
+
+- **🔴 「请求参数错误（code -400）」的根因**：BV 号正则过宽
+  旧 `/^BV[0-9A-Za-z]{10}$/` 只检查「12 个字母数字」，把含 `I` / `0` / `O` / `l`
+  的伪造号（人眼易混的字符）也判为合法 → 打到 B 站 → 接口返回 `-400`「请求错误」。
+  截图里的 `BVITX…KE9J` 正含 `I`，正中此坑。
+  新正则按 B 站 BV 生成器的实际字符集收紧到 `^BV1[base58]{9}$`，
+  字符表 `fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF`（58 字符，
+  排除 `0`/`O`/`I`/`l`），与 `bv2av` 用的 TABLE 完全一致。`isBvid` / `bv2av` /
+  `content.js parseVideoFromUrl` 三处同步更新。
+
+### 变更
+
+- `playurl` 的 `platform` 从 `'pc'` 改为 `'web'`。值等都能拿到正常响应，
+  但 B 站近年对 `pc` 的支持不稳定，yt-dlp 全部用 `'web'`，照齐以减少 -400 概率。
+
+### 测试
+
+- `selftest-core.mjs` 新增 `[7] BV 号严格校验`（9 项）：合法 BV 通过、含
+  `I`/`O`/`0`/`l` 的伪造号被拒、过短被拒、长度错误被拒、非 `BV1` 前缀被拒、
+  `bv2av` 对伪造 BV 抛错。自检 48 → **57 项**。
+
+### 验证
+
+- 真机对 4 个真实 BV（`BV1xx411c7mD` / `BV1GJ411x7h7` / `BV1ws411c7BY` /
+  `BV1mx411M7LA` 等）调 `/x/player/wbi/playurl`：三种 platform 变体（web / 极简 / pc）
+  均 `code:0`，证实本轮问题不在 WBI / fnval / 编码器语义，而是客户端校验放过非法 BV。
+
 ## [1.1.0] - 2026-09-18
 
 ### 新增

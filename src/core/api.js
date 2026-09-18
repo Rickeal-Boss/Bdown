@@ -188,7 +188,10 @@ export class BiliApi {
       fnval: mode === 'durl' ? FNVAL_DURL : epId ? FNVAL_PGC_DASH : FNVAL_DASH,
       fourk,
       otype: 'json',
-      platform: 'pc',
+      // B 站的 /x/player/wbi/playurl 在 2025 年后收紧了对 platform 的校验，
+      // 「pc」会返回 code=-400「请求参数错误」。参照 yt-dlp 的取值，改为 'web'。
+      // —— 证据：ref_39aff72d.txt（yt-dlp bilibili.py）多处以 platform='web' 调用。
+      platform: 'web',
       high_quality: 1,
       ...buildDmParams(),
     };

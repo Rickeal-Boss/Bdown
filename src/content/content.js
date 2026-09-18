@@ -17,11 +17,16 @@ let floatButton = null;
 let playerButton = null;
 let settings = { showFloatingButton: true, showPlayerButton: true };
 
+// BV 的合法字符集（与 src/core/avbv.js 的 TABLE 一致）。
+// 这里重复一份以避免 content.js 依赖 ES Module 的循环引入问题。
+const BV_BASE58 = 'fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF';
+const BV_URL_RE = new RegExp(`/video/(BV1[${BV_BASE58}]{9}|av\\d+)`, 'i');
+
 function parseVideoFromUrl(rawUrl) {
   try {
     const url = new URL(rawUrl);
     const pageIndex = Math.max(0, (Number(url.searchParams.get('p')) || 1) - 1);
-    const video = url.pathname.match(/\/video\/(BV[0-9A-Za-z]{10}|av\d+)/i);
+    const video = url.pathname.match(BV_URL_RE);
     if (video) {
       const token = video[1];
       return token.toLowerCase().startsWith('bv')

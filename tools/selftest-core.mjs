@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto';
 import { escapeHtml, sanitizeFilename } from '../src/core/util.js';
 import { formUrlEncode } from '../src/core/wbi.js';
 import { md5 } from '../src/core/md5.js';
-import { av2bv, bv2av } from '../src/core/avbv.js';
+import { av2bv, bv2av, isBvid } from '../src/core/avbv.js';
 import { buildPlan } from '../src/core/engine.js';
 
 let pass = 0;
@@ -177,6 +177,30 @@ check('durl：走单文件计划', () => {
   info.durl = [{ url: 'https://d/1', backupUrls: [], size: 999 }];
   const p = buildPlan(info, { downloadMode: 'durl' }, {});
   return eq([p.mode, p.totalBytes], ['durl', 999]);
+});
+
+console.log('\n[7] BV 号严格校验 —— 防止 0/O/I/l 错位产生 -400');
+const ok = (cond, msg) => (cond ? '' : msg);
+check('合法 BV 通过', () => ok(isBvid('BV1xx411c7mD'), 'BV1xx411c7mD 应通过'));
+check('多P常见 BV 通过', () => ok(isBvid('BV1GJ411x7h7'), '应通过'));
+check('BV1TXe36KE9J（chars 全在 base58）通过', () => ok(isBvid('BV1TXe36KE9J'), '应通过'));
+check('含 I（不在 base58）被拒', () => ok(!isBvid('BVITXe36KE9J'), '应拒绝'));
+check('含 0、O、l 被拒', () => {
+  for (const x of ['BV10OllBVID', 'BV1ABCDEFGHI', 'BV1OABCDEFGH', 'BV1lBCDEFGHI']) {
+    if (isBvid(x)) return `应当拒绝 ${x}`;
+  }
+  return '';
+});
+check('过短 BV 被拒', () => ok(!isBvid('BV1XX'), '应拒绝'));
+check('长度错误的 BV 被拒', () => ok(!isBvid('BV11xx411c7oZ'), '应拒绝'));
+check('BV2 前缀被拒（当前只支持 BV1）', () => ok(!isBvid('BV2xx411c7mD'), '应拒绝'));
+check('bv2av 也会对伪 BV 抛错', () => {
+  try {
+    bv2av('BVITXe36KE9J');
+    return '应当抛错';
+  } catch {
+    return '';
+  }
 });
 
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 核心自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);
