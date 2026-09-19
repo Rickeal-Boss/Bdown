@@ -1,3 +1,40 @@
+## [1.4.10] - 2026-09-19
+
+### P0 修 v1.4.9 引入的致命问题：util.js 被控制字符写坏
+
+给 `warn()` 加日志清洗时，我在脚本里写了形如 U+0000 的转义序列，
+**被工具链解释成了真正的控制字符（NUL / 0x1F / 0x7F）写进源码** —— 于是
+`src/core/util.js` 变成语法错误文件，所有 import 它的模块全线崩溃。
+
+已重写为用 `String.fromCharCode` 构造正则，源码里不出现任何反斜杠转义：
+
+```js
+const ctrl = new RegExp(
+  '[' + String.fromCharCode(0) + '-' + String.fromCharCode(31) + String.fromCharCode(127) + ']',
+  'g',
+);
+return a.replace(ctrl, (ch) => '<0x' + ch.charCodeAt(0).toString(16).padStart(2, '0') + '>');
+```
+
+**教训（同一个坑第三次）**：通过 shell heredoc 写文件时，反斜杠转义序列会被
+解释成真实字符。**写 JS 源码时避免在脚本里出现反斜杠转义，改用字符码构造。**
+
+### 本轮其余修复
+
+| 项 | 内容 |
+|---|---|
+| T3 | 刷新播放地址时**丢失 URL query**。B 站 m4s 的 `?e=...&deadline=...&trid=...` 是必需签参（QA 实测去掉后 4 个域名全部失败）。现在新地址若不带 `?`，用旧地址的 query 补上 |
+| B-5 | `popup.js` 的 `updateSummary()` 里 `qualityOpt.label` 未转义 → 已加 `escapeHtml()` |
+| T5 | 取消 / 完成 / 失败后，`chrome.storage` 的 `pendingTasks` 里对应条目未清理 → 关掉下载中心再打开会被重新入队。已在 `startTask` 的 `finally` 里按 `cid + pageIndex` 清理 |
+| T7 | 点「重试」只重置了 5 个字段，残留 `errorMessage` / `phaseText` / `totalBytes` / `speed` / `eta` / `finishedAt` → UI 会显示上一轮的数据。已全部清掉 |
+| T8 | `warn()` 现在把控制字符转成可见的 `<0x0d>`，避免 B 站返回内容里的回车把 DevTools 日志截断覆盖 |
+
+### 未采纳（说明）
+
+- **T6「取消后 `this.running.get(promise)` 悬挂」**：`engine.js` 里的 `this.running`
+  只是个 `Set`（且只删不增），不存在 `running.get()`；取消路径会捕获
+  `DownloadAborted` 并正常返回。该条未复现，未改动。
+
 ## [1.4.9] - 2026-09-19
 
 ### 🔴 修 CI 红：`sink.js` 里的 `truncate()` 用了未定义的 `warn`
