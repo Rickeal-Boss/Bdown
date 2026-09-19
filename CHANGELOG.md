@@ -55,6 +55,23 @@ ES Module 恒为严格模式，读取未声明标识符直接抛 `ReferenceError
 
 ## [1.4.0] - 2026-09-18
 
+> ## ⚠️ 本版本带病发布，请勿使用
+>
+> **默认下载模式（`downloadMode: 'merge'`）100% 失败。**
+> `src/core/engine.js` 的 `mergeInto({ vSink: vStage, aSink: aStage })` 中
+> `vStage` / `aStage` 未定义 —— v1.3.1 的 `prepareStage` 重构（改名成 `vPrep` / `aPrep`）
+> 漏改了这两行。ES Module 恒为严格模式，运行时直接 `ReferenceError: vStage is not defined`。
+>
+> **影响**：音视频两轨**下载完成后**才崩，任务转 `error`，已下载的临时文件被丢弃。
+> 当时 CI 全绿是因为 `tools/validate.mjs` 只做 `node --check`（语法级），
+> **抓不到读取未声明变量**。
+>
+> **已修于 v1.4.1**（`vSink: vPrep.sink, aSink: aPrep.sink`）。
+> 若你装的是本版本，请升级到 v1.4.1 或以上。
+>
+> 注：`separate` / `audio` / `durl` 三条**不混流**的分支不受影响。
+
+
 ### 新增：对 DownKyi 深度分析后的落地改动
 
 分析了 `yaobiao131/downkyi` 与 `HanLuo/downkyicore` 的真实源码（详见
@@ -101,6 +118,23 @@ ES Module 恒为严格模式，读取未声明标识符直接抛 `ReferenceError
   SSR HTML 里没有，需浏览器验证 JS 执行后是否存在
 
 ## [1.3.1] - 2026-09-18
+
+> ## ⚠️ 本版本带病发布，请勿使用
+>
+> **默认下载模式（`downloadMode: 'merge'`）100% 失败。**
+> `src/core/engine.js` 的 `mergeInto({ vSink: vStage, aSink: aStage })` 中
+> `vStage` / `aStage` 未定义 —— v1.3.1 的 `prepareStage` 重构（改名成 `vPrep` / `aPrep`）
+> 漏改了这两行。ES Module 恒为严格模式，运行时直接 `ReferenceError: vStage is not defined`。
+>
+> **影响**：音视频两轨**下载完成后**才崩，任务转 `error`，已下载的临时文件被丢弃。
+> 当时 CI 全绿是因为 `tools/validate.mjs` 只做 `node --check`（语法级），
+> **抓不到读取未声明变量**。
+>
+> **已修于 v1.4.1**（`vSink: vPrep.sink, aSink: aPrep.sink`）。
+> 若你装的是本版本，请升级到 v1.4.1 或以上。
+>
+> 注：`separate` / `audio` / `durl` 三条**不混流**的分支不受影响。
+
 
 ### 新增：断点续传的持久化层（OPFS）
 

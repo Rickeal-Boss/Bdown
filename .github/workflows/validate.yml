@@ -42,11 +42,6 @@ jobs:
       - name: 未定义标识符检查（node --check 抓不到读取未声明变量）
         run: node tools/lint-noundef.mjs
 
-      # 这条是「默认 merge 模式 100% 失败」那次 P0 的回归防护：
-      # node --check 抓不到读取未声明变量，必须真跑一遍四条分支。
-      - name: 引擎干跑（四条下载分支，防未声明变量回归）
-        run: node tools/test-engine-dryrun.mjs
-
       - name: 引擎端到端（合成 fMP4，四条分支都断言 done + 校验合并产物结构）
         run: node tools/test-engine-e2e.mjs
 
