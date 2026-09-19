@@ -1,3 +1,40 @@
+## [1.4.14] - 2026-09-19
+
+### 新增：合集（ugc_season）批量下载
+
+路线图里的「批量入口」一直没做。本轮**先用真接口探路**，再决定做哪个。
+
+**探路结论（重要，决定了路线选择）**：
+
+| 候选 | 实测结果 | 结论 |
+|---|---|---|
+| UP 主空间批量 | `/x/space/wbi/arc/search` 直接返回 **-352 风控校验失败**。需要 `buvid3` 等浏览器指纹 cookie，而扩展无法注入 | **不可行**，排除 |
+| 互动视频分支展开 | BBDown 用的 `/x/player.so` 已 **404**（返回 HTML 错误页），拿不到 `graph_version`，无法枚举分支节点 | **不可行**，排除 |
+| 合集（ugc_season） | `/x/web-interface/wbi/view/detail` 的 `ugc_season` 字段，**不受 -352 影响**，随当前视频一起返回 | **可行**，本轮实现 |
+
+> 顺带一个发现：`view` 里有个 `stein_guide_cid` 字段（互动视频的引导 cid），
+> 实测它和主 cid 都能取到 DASH 流。这比已失效的 `player.so` 靠谱，留作后续。
+
+**实现**：
+- 新增 `src/core/season.js`（纯函数）：`parseUgcSeason()` / `isBatchableSeason()` / `seasonToSpecs()`
+- 真实字段结构（实测 BV1Wi4y1k7ed，7 集）：
+  `ugc_season.sections[].episodes[]`，每集有 `bvid` / `aid` / `cid` / `title`；
+  注意 **`duration` 和封面不在 episode 顶层，在 `arc.duration` / `arc.pic`**，`page` 是对象不是数字
+- **定位不了的条目直接跳过**（无 cid 会让 playurl 返回 -400），不给下游制造失败任务
+- 只有 ≥2 集才算「可批量」（1 集的"合集"就是普通单视频）
+- 弹窗新增「所属合集」区块：显示《合集名》与集数，勾选后按合集逐集建任务
+- 拉集合集失败**绝不影响**单视频下载（独立 try/catch + warn）
+
+### 测试
+
+- 新增 `tools/test-season.mjs`（**44 项**），已接入 CI。夹具字段结构来自真实接口实测
+- CI 自检 **20 个套件**
+
+### 已知局限
+
+- 弹窗 UI 部分（合集区块渲染 / 勾选逻辑）**CI 测不到**，需真机确认
+- 合集里每集的清晰度各自独立挑选（受各自账号权限限制），可能与预期不同
+
 ## [1.4.13] - 2026-09-19
 
 ### 修 NFO 的 0 值元素（QA 复核发现，Jellyfin 会读成"片长 0 分钟"）

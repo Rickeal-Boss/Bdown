@@ -5,7 +5,8 @@
 import { BiliApi, pickVideoTrack, pickAudioTrack } from '../core/api.js';
 import { QUALITIES, qualityShort } from '../core/quality.js';
 import { loadSettings, saveSettings } from '../core/settings.js';
-import { extractVideoId, formatBytes, formatDuration, parseRangeExpr, sanitizeFilename, applyTemplate, formatNumber, escapeHtml } from '../core/util.js';
+import { extractVideoId, formatBytes, formatDuration, parseRangeExpr, sanitizeFilename, applyTemplate, formatNumber, escapeHtml, warn } from '../core/util.js';
+import { parseUgcSeason, isBatchableSeason, seasonToSpecs } from '../core/season.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -13,6 +14,8 @@ const api = new BiliApi();
 let settings = null;
 /** @type {any} */
 let videoInfo = null;
+/** 当前视频所属的合集（ugc_season）；不是每个视频都有 */
+let ugcSeason = null;
 /** @type {any} */
 let playInfo = null;
 /** @type {{ bvid?: string, aid?: number, epId?: number, seasonId?: number, pageIndex: number }|null} */
@@ -108,6 +111,20 @@ async function loadVideo() {
       currentSpec = { ...spec, bvid: ep.bvid, aid: ep.aid, epId: ep.ep_id, seasonId: spec.seasonId };
     } else {
       videoInfo = await api.videoInfo(spec);
+    }
+
+    // 合集（ugc_season）批量入口：走 view/detail，**不碰 space 接口**
+    // （space 实测 -352 风控）。不是每个视频都有合集，失败绝不能影响单视频下载。
+    ugcSeason = null;
+    try {
+      if (videoInfo?.bvid && !spec.epId && !spec.seasonId) {
+        const detail = await api.videoDetail({ bvid: videoInfo.bvid });
+        const parsed = parseUgcSeason(detail);
+        ugcSeason = isBatchableSeason(parsed) ? parsed : null;
+      }
+    } catch (err) {
+      warn('合集信息获取失败（不影响单视频下载）', err?.message);
+      ugcSeason = null;
     }
 
     playInfo = await api.playurl({
@@ -256,6 +273,20 @@ function render() {
     selectedPages = new Set([1]);
   }
 
+  // 所属合集
+  const seasonSection = $('seasonSection');
+  const seasonCb = $('optWholeSeason');
+  if (ugcSeason) {
+    seasonSection.hidden = false;
+    $('seasonLabel').textContent = `下载整个合集（${ugcSeason.episodes.length} 集）`;
+    $('seasonHint').textContent = `《${ugcSeason.title}》—— 勾选后按合集逐集建任务`;
+    seasonCb.onchange = () => updateSummary();
+  } else {
+    seasonSection.hidden = true;
+    seasonCb.checked = false;
+    seasonCb.onchange = null;
+  }
+
   // 附加内容
   $('optDanmaku').checked = !!settings.saveDanmaku;
   $('optSubtitle').checked = !!settings.saveSubtitle;
@@ -266,6 +297,55 @@ function render() {
 
 function collectSpecs() {
   const info = videoInfo;
+
+  // 合集批量：勾选后忽略分P选择，把合集每一集展开成一个任务
+  if (ugcSeason && $('optWholeSeason')?.checked) {
+    const qOpt = buildQualityOptions().find((o) => o.quality === selectedQuality);
+    const total = ugcSeason.episodes.length;
+    return seasonToSpecs(ugcSeason).map((s) => {
+      const vars = {
+        title: ugcSeason.title || info?.title || '',
+        part: s.title || '',
+        n: formatNumber(s.index + 1, total),
+        p: s.index + 1,
+        bvid: s.bvid || '',
+        aid: s.aid || '',
+        cid: s.cid || '',
+        user: info?.owner?.name || '',
+        userID: info?.owner?.mid || '',
+        qualityShort: qOpt?.short || '',
+      };
+      let filename = applyTemplate(settings.batchNameTemplate, vars);
+      if (settings.nameWithQuality && qOpt?.short) {
+        filename += applyTemplate(settings.qualitySuffix, vars);
+      }
+      return {
+        bvid: s.bvid,
+        aid: s.aid,
+        cid: s.cid,
+        pageIndex: 0,
+        totalPages: 1,
+        isBatch: true,
+        quality: selectedQuality,
+        qualityShort: qOpt?.short || '',
+        title: s.title || ugcSeason.title || '',
+        filename: sanitizeFilename(filename),
+        cover: s.cover || info?.pic || '',
+        info: {
+          title: s.title || ugcSeason.title,
+          bvid: s.bvid,
+          aid: s.aid,
+          pubdate: info?.pubdate || 0,
+          owner: info?.owner,
+          duration: s.duration || 0,
+          pages: [{ page: 1, part: s.title, cid: s.cid, duration: s.duration || 0 }],
+        },
+        page: null,
+        sourceUrl: `https://www.bilibili.com/video/${s.bvid || `av${s.aid}`}`,
+      };
+    });
+  }
+
   const pages = info.pages || [];
   const total = pages.length;
   const chosen = [...selectedPages].sort((a, b) => a - b);
