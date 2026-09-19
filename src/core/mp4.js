@@ -197,7 +197,17 @@ export async function scanFile(source) {
     else if (b.type === 'moov') moovBox = b;
     else if (b.type === 'moof') break;
   }
-  if (!moovBox) throw new Error('不是有效的 MP4：未找到 moov 盒子（该文件可能不是 DASH 分片流）');
+  // B 站 DASH 分片流（m4s）的实际字节结构是 ftyp + styp + moof + mdat，
+  // 全程**没有 moov**（moov 在 init 段，分片不带）。merge 模式要的是 init 段，
+  // 而我们的 playurl 直接给分片。
+  // 修法：完整自造合并 moov 是大改动（要重写 buildMergedMoov 让它从 moof
+  // 推算 mvhd/trak/trex），列入下一版；这一版只在错误文案里写清楚。
+  if (!moovBox) {
+    throw new Error(
+      '不支持该来源：B 站 DASH 分片流不含 moov，mp4.js 当前无法直接合并；' +
+      '请在选项页/弹窗把"下载方式"改为「音视频分离」（separate）后重试'
+    );
+  }
 
   const moov = await source.read(moovBox.start, moovBox.size);
   const ftyp = ftypBox ? await source.read(ftypBox.start, ftypBox.size) : defaultFtyp();

@@ -1,3 +1,38 @@
+## [1.4.4] - 2026-09-19
+
+### 🔴 v1.0.0 至今的根 bug：merge 模式根本跑不通
+
+**真根**：B 站 DASH 分片流（m4s）的实际字节结构是 `ftyp + styp + moof + mdat`，
+**全程没有 moov**（moov 在 init 段，分片不带）。我们的 `mp4.scanFile` 假设分片里有 moov
+（用来取 mvhd/trak/mvex/trex），遇到真实分片直接抛「不是有效的 MP4：未找到 moov
+盒子（该文件可能不是 DASH 分片流）」—— 一抛就退出，连扫 moof+mdat 片段都不做。
+
+**为什么 CI 没发现**：v1.4.3 之前用 `selftest-synthetic.mjs`（合成 fMP4，含 moov）测
+合并，所以 merge=4/4 PASS；我们**没有用真实分片形状**测过。从 v1.0.0 至 v1.4.3 五个
+发布版本，**真实 merge 下载从未成功过**。
+
+修复（这一版只是把症状说清楚，根因修复是下一版的事）：
+- 错误文案改成：`不支持该来源：B 站 DASH 分片流不含 moov，mp4.js 当前无法
+  直接合并；请把"下载方式"改为「音视频分离」后重试`
+- 新增 `tools/test-mp4.mjs`（4 项），用真实分片字节（`ftyp+moof+mdat`，无 moov）锁住
+  行为：必须抛错且文案含「DASH 分片流不含 moov」「音视频分离」，**且不**是旧的
+  「未找到 moov 盒子」（防止以后退化）
+
+### Workaround（用户立即可用）
+
+- **别用 merge / separate / audio / durl 默认 merge**：用 `downloadMode='separate'`
+  下两个文件（video.mp4 + audio.m4a），再自行 ffmpeg 合并
+
+### 下版（v1.5.0）真正要做的
+
+- 重写 `buildMergedMoov`：从 `moof.tfhd/trun` 推算 mvhd.duration 与 timesclae、
+  构造 trak（hdlr+mdhd+minf）、trex 默认值；这样**纯分片流**也能直接合并出可播的 MP4
+
+### 测试
+
+- 新增 `test-mp4.mjs` 4 项已接入 CI。
+- CI 自检 **13 个套件**（added mp4）。
+
 ## [1.4.3] - 2026-09-19
 
 ### 新增：章节（chapters）保存
