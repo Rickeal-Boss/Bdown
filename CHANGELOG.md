@@ -7,6 +7,43 @@
 src/core/util.js 语法错误，所有 import 它的模块全线崩溃
 （validate 一度报 22 项检查失败 10 项）。
 
+已重写为用 String.fromCharCode 构造正则，源码里不再出现任何反斜杠转义。
+实测：warn 收到含回车的消息时输出可见的 <0x0d> 形式。
+
+### 本轮修复（来自最新一轮 QA 应用层审查）
+
+| 项 | 严重度 | 内容 |
+|---|---|---|
+| T1 | 严重 | 过期重试在 3/6 调用点未接线（默认 merge 模式的视频轨与音轨都没有）→ 已补齐全部 6 处（d/a/v/a/v/a） |
+| T3 | 严重 | 刷新播放地址时丢失 URL query（B 站 m4s 的 ?e=&deadline=&trid= 是必需签参，实测去掉后 4 个域名全失败）→ 新增 withQuery() 兜底 |
+| T5 | 严重 | 取消时 pendingTasks 残留（用户取消后关掉下载中心再打开，任务会被重新入队）→ 新增 prunePendingTask() |
+| T6 衍生 | 中 | engine 的 this.running 是个只删不增的 Set（死代码）→ 改为真正登记并在 finally 释放，并新增 cancelTask() 可外部调用 |
+| T7 | 中 | 点「重试」只重置 5 个字段，残留 errorMessage / phaseText / totalBytes / speed / eta / finishedAt → UI 显示上一轮数据。已全部清掉 |
+| F-1 | 中 | FileHandleSink 从不关闭 writable（investigator F9b）→ 新增 flush() 并在 mergeInto 读回前调用（v1.4.7 的 close() 只解决了合并路径） |
+| T8 | 低 | 弹窗「复制调试日志」的最后 200 行日志 HTML 输出未做 HTML 转义（视频标题可注入）→ 改用 textContent |
+| B-5 | 低 | popup.js 的 updateSummary 里 qualityOpt.label 未转义 → 加 escapeHtml() |
+
+### 未采纳（已核实不成立）
+
+- **T6「取消后 this.running.get(promise) 永久悬挂」**：engine.js 的 this.running
+  只是个 Set（且只删不增），不存在 running.get()；取消路径会捕获 DownloadAborted
+  并正常返回。未复现，未改动（但顺带把死代码修成了真正可用的登记/释放）。
+
+### 教训（同一坑第三次）
+
+**通过 shell heredoc 写 JS 源码时，反斜杠转义会被解释成真实字符**
+（第一次：测试文件里的换行；第二次：测试文件里的换行；第三次：util.js 的控制字符）。
+以后写这类代码一律用字符码（String.fromCharCode）或 chr(92) 构造，不要直接写转义。
+
+## [1.4.10] - 2026-09-19
+
+### P0 修 v1.4.9 引入的致命问题：util.js 被真实控制字符写坏
+
+给 warn() 加日志清洗时，脚本里写的转义序列（形如 U+0000）被工具链
+**解释成了真正的控制字符（NUL / 0x1F / 0x7F）写入源码**，导致
+src/core/util.js 语法错误，所有 import 它的模块全线崩溃
+（validate 一度报 22 项检查失败 10 项）。
+
 已重写为用 String.fromCharCode 构造正则，源码里不出现任何反斜杠转义。
 实测：warn 收到含回车的消息时输出 <0x0d> 这样的可见形式。
 
