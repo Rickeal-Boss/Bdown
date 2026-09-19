@@ -23,6 +23,7 @@ import { ResumeStore, resumeKey } from './resume-store.js';
 import { parseDanmakuXml, danmakuToAss, danmakuToSrt, danmakuToText, filterDanmaku } from './danmaku.js';
 import { parseSubtitleJson, subtitleToSrt, subtitleToAss, subtitleToText, pickSubtitle } from './subtitle.js';
 import { parseViewPoints, chaptersToTxt, chaptersToVtt } from './chapters.js';
+import { buildNfo, nfoFilename } from './nfo.js';
 import { buildFilename, buildVars } from './settings.js';
 import { qualityShort } from './quality.js';
 import { sanitizeFilename, log, warn } from './util.js';
@@ -868,6 +869,35 @@ export class DownloadEngine {
       }
     }
 
+    // NFO（Jellyfin / Kodi 归档）：与媒体文件同基名，避免多P互相覆盖
+    if (settings.saveNfo) {
+      try {
+        const info = spec.info || {};
+        const page = info.pages?.[spec.pageIndex || 0];
+        const isEpisode = !!(spec.epId || spec.seasonId || spec.cheeseId)
+          || (info.pages?.length || 0) > 1;
+        const nfo = buildNfo({
+          kind: isEpisode ? 'episode' : 'movie',
+          title: isEpisode && page?.part ? `${info.title || spec.title} - ${page.part}` : (info.title || spec.title),
+          showTitle: info.title || spec.title,
+          season: isEpisode ? 1 : undefined,
+          episode: isEpisode ? (Number(spec.pageIndex || 0) + 1) : undefined,
+          plot: info.desc,
+          pubdate: info.pubdate,
+          duration: page?.duration || info.duration || spec.duration,
+          cover: spec.cover || info.pic,
+          owner: info.owner,
+          genre: info.tname,
+          bvid: info.bvid || spec.bvid,
+          aid: info.aid || spec.aid,
+        });
+        await put(nfoFilename(task.filename), nfo, 'text/xml');
+        log('NFO 已保存');
+      } catch (err) {
+        warn('NFO 生成失败', err);
+      }
+    }
+
     if (settings.saveCover && spec.cover) {
       try {
         const res = await fetch(spec.cover, { credentials: 'omit' });
@@ -964,6 +994,11 @@ export async function ensureSpecComplete(spec, api, isCanceled = () => false) {
       pubdate: info.pubdate,
       owner: info.owner,
       duration: info.duration,
+      // NFO 需要：简介 / 封面 / 分区。都是同一个 view 接口返回的，不额外请求。
+      desc: info.desc,
+      pic: info.pic,
+      tname: info.tname,
+      tid: info.tid,
       pages,
     };
   }

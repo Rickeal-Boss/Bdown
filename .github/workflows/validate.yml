@@ -40,6 +40,9 @@ jobs:
       - name: 章节模块自检（view_points 解析与 txt/vtt 导出）
         run: node tools/test-chapters.mjs
 
+      - name: NFO 元数据自检（XML 转义 / movie+episode+tvshow 三形态）
+        run: node tools/test-nfo.mjs
+
       # 防止 v1.0.0 至今没人能跑通 merge 模式这种病再回来：构造真实
       # DASH 分片字节（无 moov），断言 scanFile 抛我们改过的明确错误。
       - name: mp4.js 自检（真实分片流必须给出明确错误，不静默 pass）

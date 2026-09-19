@@ -35,6 +35,8 @@ export const DEFAULT_SETTINGS = {
   saveSubtitle: false,
   /** 章节（view_points）—— 与字幕共用同一次请求，开启几乎零成本 */
   saveChapters: false,
+  /** NFO 元数据（Jellyfin / Kodi 归档）。用的是已取到的 view 数据，零额外请求 */
+  saveNfo: false,
   /** 章节格式：txt（YouTube 风格）或 vtt（WebVTT 章节轨） */
   chapterFormat: 'txt',
   subtitleFormat: 'srt', // srt | ass | txt

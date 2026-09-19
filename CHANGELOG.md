@@ -1,3 +1,36 @@
+## [1.4.11] - 2026-09-19
+
+### 新增：NFO 元数据（Jellyfin / Kodi / Emby 媒体库归档）
+
+继章节（chapters）之后，补上媒体库归档的另一半：下载时附带生成 NFO 文件，
+下载目录可被 Jellyfin 直接刮削成条目（标题、简介、封面、UP 主、发布日期、时长）。
+
+**设计要点**：
+- 纯函数模块 `src/core/nfo.js`，**零额外网络请求** —— 用的都是 `/x/web-interface/view`
+  已经返回的字段（本轮把 `desc` / `pic` / `tname` / `tid` 补进了 `spec.info`）
+- **缺字段就省略该元素**，不写空标签（Jellyfin 对空值容忍度差）
+- 所有文本走 `escapeXml` —— B 站标题/简介里确实有 `&` 和引号
+- 两种形态：`movie`（普通单P）与 `episode`（番剧 / 多P，带 season + episode）
+- 文件名与媒体文件同基名（`xxx.mp4` + `xxx.nfo`），多P 不会互相覆盖
+- **默认关闭**（与弹幕/字幕/封面/章节一致，不产生意外文件）
+
+**字段映射**：title / desc / pubdate / duration / pic / owner.name / tname / bvid
+→ `<title>` / `<plot>` / `<premiered>+<year>` / `<runtime>`（分钟）/ `<thumb>` /
+`<actor>` / `<genre>` / `<id>+<uniqueid type="bilibili">`。
+
+### 测试
+
+- 新增 `tools/test-nfo.mjs`（**49 项**），已接入 CI：
+  XML 转义 8 项、日期换算 5 项、时长换算 5 项、movie 形态 12 项、episode 形态 5 项、
+  缺字段不写空标签 7 项、tvshow 形态 4 项、文件名约定 5 项
+- CI 自检 **19 个套件**
+
+### 已知局限
+
+- NFO 的 `<genre>` 用的是 B 站分区名（如"知识"），不是标准影视分类，
+  Jellyfin 可能显示为自定义类型 —— 这是 B 站内容没有标准分类的固有限制
+- UP 主放进 `<actor>` 是借用字段（Kodi 没有"创作者"对应元素），属于务实取舍
+
 ## [1.4.10] - 2026-09-19
 
 ### P0 修 v1.4.9 引入的致命问题：util.js 被真实控制字符写坏
