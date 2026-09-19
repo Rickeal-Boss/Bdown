@@ -626,7 +626,7 @@ export class DownloadEngine {
    *   当下载因 **URL 过期** 失败（B 站 CDN 地址约 120 分钟失效，表现为 403/404）时，
    *   调用它重新拿一批地址并重试一次。不传则沿用旧行为（只重试同一批地址，必然全败）。
    */
-  async fetchTo({ urls, size, sink, onProgress, signal, probe = true, resume = null, refreshUrls = null }) {
+  async fetchTo({ urls, size, sink, onProgress, signal, probe = true, resume = null, refreshUrls = null, writeOffset = 0 }) {
     let list = (urls || []).filter(Boolean);
     if (!list.length) throw new Error('没有可用的下载地址');
     let total = size;
@@ -648,6 +648,7 @@ export class DownloadEngine {
       const result = await downloadRanged({
         urls: list,
         size: total,
+        writeOffset,
         sink,
         concurrency,
         signal,

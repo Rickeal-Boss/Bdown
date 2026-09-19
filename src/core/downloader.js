@@ -135,6 +135,11 @@ export async function downloadRanged({
   resumeRanges = null,
   /** 注入 fetch 实现，便于测试。不传用全局 fetch。 */
   fetchImpl = null,
+  /**
+   * 写入起点偏移。用于 durl 多段下载：每段按自己的 range 下，
+   * 但要写到整个文件的对应位置，否则后一段会从 0 开始覆盖前一段。
+   */
+  writeOffset = 0,
 }) {
   const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
   if (!list.length) throw new Error('没有可用的下载地址');
@@ -266,7 +271,7 @@ export async function downloadRanged({
         try {
           const out = await retry(() => fetchRange(url, range, signal), { times: 2, baseDelay: 500 });
           throwIfAborted();
-          await sink.writeAt(range.start, out.bytes);
+          await sink.writeAt(range.start + writeOffset, out.bytes);
           range.done = true;
           pendingRanges.push({ start: range.start, end: range.start + out.bytes.length - 1 });
           downloaded += out.bytes.length;

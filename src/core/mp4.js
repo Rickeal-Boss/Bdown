@@ -99,6 +99,22 @@ export function readBoxHeaderLoose(bytes, offset) {
   return { type, size, headerSize, start: offset, end: offset + size };
 }
 
+/**
+ * 在 moof 的子盒里找到 `mfhd`，返回其 `sequence_number` 字段相对 moof 起点的偏移。
+ * 找不到返回 null（调用方应跳过改写，而不是按固定偏移去写）。
+ *
+ * 为什么不写死 `start + 20`：那等价于假设 mfhd 一定是 moof 的第一个子盒。
+ * 规范只要求 mfhd 必须存在，**没有要求它排第一**。
+ */
+export function findMfhdSeqOffset(moofBytes) {
+  const kids = listBoxes(moofBytes, 8, moofBytes.length);
+  const mfhd = findBox(kids, 'mfhd');
+  if (!mfhd) return null;
+  // mfhd 体：version(1) + flags(3) + sequence_number(4)
+  const seq = mfhd.start + mfhd.headerSize + 4;
+  return seq + 4 <= moofBytes.length ? seq : null;
+}
+
 /** 列出 [start, end) 范围内的同级盒子。 */
 export function listBoxes(bytes, start = 0, end = bytes.length) {
   const out = [];
@@ -237,23 +253,55 @@ export async function scanFile(source) {
   let off = moovBox.end;
   let sequence = 0;
 
+  // 片段扫描。
+  //
+  // 原来的写法是在 16KB 窗口里 listBoxes，有两个**静默**失败：
+  //   1) readBoxHeader 要求 offset+size <= limit。一旦某个 moof 超过窗口，
+  //      listBoxes 因 header 为 null 直接 break —— 后面所有片段被静默丢弃，
+  //      产出「能播但缺半段」的文件，真机上极难发现（这是最危险的一类失败）
+  //   2) 顶层扫描同理：moov 若结束于 16384 之后，会被误报「未找到 moov」
+  //
+  // 改法：先用「松」的头部读取拿到真实 size，再**按 size 整块读取**；
+  // 不再依赖窗口大小，也就不再受这两个阈值影响。
   while (off + 8 <= source.size) {
-    const chunk = await source.read(off, Math.min(READ_AHEAD, source.size - off));
-    if (chunk.length < 8) break;
-    const boxes = listBoxes(chunk, 0, chunk.length);
-    if (!boxes.length) {
-      // 无法解析：避免死循环，直接放弃后续片段
-      break;
+    const headBytes = await source.read(off, 16);
+    if (headBytes.length < 8) break;
+    const hdr = readBoxHeaderLoose(headBytes, 0);
+    if (!hdr) break;
+
+    // 声明的大小超出文件剩余字节 = 文件被截断（下载中断）
+    if (hdr.size < 8 || off + hdr.size > source.size) {
+      throw new Error(
+        `文件不完整：偏移 ${off} 处的 ${hdr.type} 声明大小为 ${hdr.size} 字节，` +
+        `但文件只剩 ${source.size - off} 字节。请重新下载（可能是下载中断或续传残留）`,
+      );
     }
 
-    let handled = false;
-    for (const b of boxes) {
-      const absStart = off + b.start;
+    {
+      const absStart = off;
+      const b = hdr;
       if (b.type === 'moof') {
-        const tail = await source.read(absStart + b.size, 8);
+        // 整块读取 moof（不再受 16KB 窗口限制）
+        const moofBytes = await source.read(absStart, b.size);
+        const tail = await source.read(absStart + b.size, 16);
         const mdatHeader = tail.length >= 8 ? readBoxHeaderLoose(tail, 0) : null;
-        const mdatSize = mdatHeader && mdatHeader.type === 'mdat' ? mdatHeader.size : 0;
-        const info = parseMoof(chunk.subarray(b.start, b.end), absStart, mediaTimescale, trexDefaults);
+        if (!mdatHeader) break;
+        if (mdatHeader.type !== 'mdat') {
+          // 原来是「mdatSize = 0」 -> 静默丢掉这个片段的 mdat。
+          // 静默丢数据是最坏的一类失败，改为明确报错。
+          throw new Error(
+            `结构异常：moof 之后紧跟的是 ${mdatHeader.type} 而不是 mdat` +
+            `（偏移 ${absStart + b.size}）。无法安全合并，请改用「音视频分离」模式`,
+          );
+        }
+        const mdatSize = mdatHeader.size;
+        if (absStart + b.size + mdatSize > source.size) {
+          throw new Error(
+            `文件不完整：最后一个 mdat 被截断（声明 ${mdatSize} 字节）。请重新下载`,
+          );
+        }
+        const info = parseMoof(moofBytes, absStart, mediaTimescale, trexDefaults);
+        const mfhdSeq = findMfhdSeqOffset(moofBytes);
         fragments.push({
           moofStart: absStart,
           totalSize: b.size + mdatSize,
@@ -263,25 +311,18 @@ export async function scanFile(source) {
           timescale: mediaTimescale,
           tfhdTrackIdOffset: info.tfhdTrackIdOffset,
           tfhdTrackIdOffsets: info.tfhdTrackIdOffsets,
-          // moof[0..8] + mfhd size[8..12] + 'mfhd'[12..16] + version/flags[16..20] + sequence_number[20..24]
-          mfhdSeqOffset: absStart + 20,
+          // 不能硬编码 absStart + 20：那假设了 mfhd 一定是 moof 的第一个子盒。
+          // 正确做法是在 moof 的子盒里找到 mfhd，sequence_number 在
+          // version/flags(4 字节) 之后。找不到就返回 null，由调用方跳过改写。
+          mfhdSeqOffset: mfhdSeq === null ? null : absStart + mfhdSeq,
         });
         sequence += 1;
         off = absStart + b.size + mdatSize;
-        handled = true;
-        break;
+        continue;
       }
-      if (['sidx', 'mfra', 'free', 'skip', 'styp', 'mdat', 'udta', 'uuid'].includes(b.type)) {
-        off = absStart + b.size;
-        handled = true;
-        break;
-      }
-      // 未知盒子：整体跳过，保证前进
+      // 其它顶层盒（sidx / styp / free / mdat / 未知类型）：整体跳过，保证前进
       off = absStart + b.size;
-      handled = true;
-      break;
     }
-    if (!handled) break;
     void sequence;
   }
 
@@ -597,7 +638,12 @@ export async function mergeDashStream({ videoSource, audioSource, write, onProgr
     const src = item.side === 'v' ? videoSource : audioSource;
 
     // 需要打的补丁：mfhd.sequence_number 与（必要时）tfhd.track_ID
-    const patches = [{ offset: f.mfhdSeqOffset, value: seq }];
+    const patches = [];
+    // mfhdSeqOffset 可能为 null（结构里没找到 mfhd）——
+    // 这时**跳过改写**而不是按固定偏移去写，否则会把别的字段写坏。
+    if (f.mfhdSeqOffset !== null && f.mfhdSeqOffset >= 0) {
+      patches.push({ offset: f.mfhdSeqOffset, value: seq });
+    }
     // 一个 moof 内可能有多个 traf，逐个把 track_ID 统一成 1（视频）/ 2（音频）
     for (const t of f.tfhdTrackIdOffsets || []) {
       if (t.offset >= 0 && t.trackId !== expectedTrackId) {
