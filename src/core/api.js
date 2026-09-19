@@ -221,33 +221,93 @@ export class BiliApi {
    * 账号与 WBI 密钥。
    * 注意：未登录时接口返回 code=-101，但 data.wbi_img 依然有效，不能直接抛错。
    */
-  async nav({ quiet = false } = {}) {
+  /**
+   * 账号/导航接口。
+   *
+   * 这里**刻意不走通用的 `get()`**：`get()` 会在响应体里找 `code` 字段，而 nav
+   * 未登录时返回 `{ code: -101, data: { wbi_img: {...} } }`——-101 是**正常状态**，
+   * 不是错误，WBI 模块还要从中取密钥。
+   *
+   * 但原来的实现有三个硬伤（会导致「已登录用户被误判成未登录」，进而清晰度降级）：
+   *   1. 无超时 —— 网络挂起时永久卡住（它在 get() 的 20s 定时器之外）
+   *   2. 无重试 —— 一次失败就抛
+   *   3. 不查 `res.ok` / content-type —— B 站 WAF 返回 412 HTML 时，`res.json()`
+   *      会裸抛 SyntaxError，调用方 catch 后当成"未登录"
+   *
+   * 现已补上超时（8s）、重试（2 次）、状态与 content-type 校验。
+   */
+  async nav({ quiet = false, timeout = 8000, retries = 2 } = {}) {
     const url = `${API}/x/web-interface/nav`;
-    const res = await this.fetchImpl(url, {
-      credentials: 'include',
-      cache: 'no-store',
-      headers: { Referer: REFERER },
-    });
-    const json = await res.json();
-    if (!quiet) {
-      this.account = {
-        isLogin: !!json?.data?.isLogin,
-        uname: json?.data?.uname || '',
-        mid: json?.data?.mid || 0,
-        vip: !!json?.data?.vipStatus,
-        checkedAt: Date.now(),
-      };
-      log('账号状态', this.account);
+    let lastErr = null;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort('nav-timeout'), timeout);
+      try {
+        const res = await this.fetchImpl(url, {
+          credentials: 'include',
+          cache: 'no-store',
+          signal: ctrl.signal,
+          headers: { Referer: REFERER, ...COMMON_HEADERS },
+        });
+
+        // WAF / 风控会返回 HTML 错误页（如 412），先挡掉，避免 res.json() 裸抛
+        if (!res.ok) throw new BiliError(res.status, `HTTP ${res.status}`, url);
+        const ctype = res.headers?.get?.('content-type') || '';
+        if (ctype && !/json/i.test(ctype)) {
+          throw new BiliError(-1, `响应不是 JSON（content-type: ${ctype}），可能被风控拦截`, url);
+        }
+
+        const json = await res.json();
+        if (!quiet) {
+          this.account = {
+            isLogin: !!json?.data?.isLogin,
+            uname: json?.data?.uname || '',
+            mid: json?.data?.mid || 0,
+            vip: !!json?.data?.vipStatus,
+            checkedAt: Date.now(),
+          };
+          log('账号状态', this.account);
+        }
+        // 未登录时返回 { code: -101, data: { wbi_img: {...} } }，原样返回给 wbi 模块
+        return json;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < retries) {
+          warn(`nav 第 ${attempt + 1} 次失败，重试中`, err?.message);
+          await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+        }
+      } finally {
+        clearTimeout(timer);
+      }
     }
-    // 未登录时返回 { code: -101, data: { wbi_img: {...} } }，这里原样返回给 wbi 模块
-    return json;
+    throw lastErr;
   }
 
   /** 当前账号是否已登录（带 60 秒缓存）。 */
-  async ensureAccount({ force = false } = {}) {
-    if (!force && this.account && Date.now() - this.account.checkedAt < 60_000) return this.account;
-    await this.nav();
-    return this.account;
+  /**
+   * 当前账号状态（带缓存 + 失败回退）。
+   *
+   * **关键改动**：nav 偶发失败（网络抖动 / WAF）时，如果本地已有**近期确认过**的
+   * 登录态，就继续沿用缓存而不是把用户降级成"未登录"。
+   * 否则一次抖动就会让用户从 1080P 掉到 720P（playurl 里 `try_look` 与清晰度都依赖 isLogin）。
+   */
+  async ensureAccount({ force = false, staleToleranceMs = 30 * 60 * 1000 } = {}) {
+    const fresh = this.account && Date.now() - this.account.checkedAt < 60_000;
+    if (!force && fresh) return this.account;
+
+    try {
+      await this.nav();
+      return this.account;
+    } catch (err) {
+      const stale = this.account;
+      // 有旧缓存且在容忍期内 → 沿用它，只是标记一下
+      if (!force && stale && Date.now() - stale.checkedAt < staleToleranceMs) {
+        warn('nav 失败，沿用上次已知的账号状态（避免误判为未登录导致清晰度降级）', err?.message);
+        return stale;
+      }
+      throw err;
+    }
   }
 
   /** 视频基本信息（标题、封面、分P、合集入口等）。 */

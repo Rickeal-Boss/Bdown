@@ -197,15 +197,20 @@ export async function scanFile(source) {
     else if (b.type === 'moov') moovBox = b;
     else if (b.type === 'moof') break;
   }
-  // B 站 DASH 分片流（m4s）的实际字节结构是 ftyp + styp + moof + mdat，
-  // 全程**没有 moov**（moov 在 init 段，分片不带）。merge 模式要的是 init 段，
-  // 而我们的 playurl 直接给分片。
-  // 修法：完整自造合并 moov 是大改动（要重写 buildMergedMoov 让它从 moof
-  // 推算 mvhd/trak/trex），列入下一版；这一版只在错误文案里写清楚。
+  // 注意：v1.4.4 曾在此断言「B 站 DASH 分片流不含 moov」——**该结论已被实测证伪**。
+  // 实测 BV16s7b68EEz 的 Q32/Q16 全部轨道，box 结构均为
+  //   ftyp -> moov -> sidx -> moof -> mdat
+  // 即**有 moov**（904 字节）。所以这里报「未找到 moov」多半是别的原因：
+  //   1) 文件没下完整（断点续传残留 / 下载中断 / source.size 不对）
+  //   2) 该视频确实是纯 segment（styp + moof + mdat，无 init 段）
+  //   3) 拿到的根本不是 DASH 分片（比如 durl 的普通 mp4）
+  // 因此错误文案保持中立，并把实际扫到的 box 列出来方便定位。
   if (!moovBox) {
+    const seen = top.map((b) => `${b.type}@${b.start}`).join(', ') || '(空)';
     throw new Error(
-      '不支持该来源：B 站 DASH 分片流不含 moov，mp4.js 当前无法直接合并；' +
-      '请在选项页/弹窗把"下载方式"改为「音视频分离」（separate）后重试'
+      `无法合并：在文件头部未找到 moov（已扫描到的顶层 box：${seen}）。` +
+      '可能原因：文件未下载完整、该视频是纯 segment 流（无 init 段）、' +
+      '或拿到的不是 DASH 分片。可先点「重试」；仍失败请改用「音视频分离」模式。'
     );
   }
 

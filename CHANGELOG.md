@@ -1,3 +1,53 @@
+## [1.4.5] - 2026-09-19
+
+### 🔴 修复「获取登录信息失败导致使用问题」—— 已登录用户被误判成未登录
+
+用户反馈：扩展开启时获取 B 站登录信息失败，导致使用上出问题。
+
+**机理**（排障手上轮已报、本轮实测确认）：`api.nav()` 有三个硬伤：
+  1. **无超时** —— 网络挂起时永久卡住（它在 `get()` 的 20s 定时器之外，直接调 fetchImpl）
+  2. **无重试** —— 一次失败就抛
+  3. **不查 `res.ok` / content-type** —— B 站 WAF 返回 **412 HTML 错误页**时，
+     `res.json()` 裸抛 `SyntaxError`
+
+结果：`playurl` 里的 `await this.ensureAccount().then(a => a.isLogin).catch(() => false)`
+把**已登录**用户 catch 成 `false`（未登录）→ 传 `try_look=1`、清晰度按未登录降档
+（1080P → 720P）。用户感知就是"登录了却只能下低清 / 下载失败"。
+
+**修复**：
+- `nav()` 加超时（默认 8s，`AbortController`）、重试（默认 2 次，指数退避 300/600ms）、
+  `res.ok` 检查、`content-type` 检查（非 JSON 明确报"可能被风控拦截"而非 SyntaxError）
+- `ensureAccount()` 加**失败回退**：nav 偶发失败时，若本地有近期（30 分钟内）确认过的
+  登录态，**沿用缓存**而不是降级成未登录。一次网络抖动不该让用户掉清晰度
+- 无缓存时才抛出（不掩盖真实的首次失败）
+
+### ⚠️ 撤回 v1.4.4 的错误断言（重要）
+
+v1.4.4 我曾断言「B 站 DASH 分片流不含 moov」并据此改了错误文案。
+**该结论已被实测证伪**：抓真实 m4s 字节解析 box，`BV16s7b68EEz` 的 **Q32 与 Q16 全部轨道**
+结构均为 `ftyp(32) → moov(904) → sidx(304) → moof(1904) → mdat(...)`，**有 moov**。
+
+所以「未找到 moov」的真因是别的（文件未下完整 / 该视频是纯 segment / 拿到的不是 DASH 分片）。
+错误文案已改为**中立 + 带诊断**（输出实际扫到的顶层 box 列表），不再下错误断言。
+
+### 测试
+
+- 新增 `tools/test-nav.mjs`（11 项），已接入 CI：
+  WAF HTML 必须显式报错（非 SyntaxError）、重试自愈、**抖动时不降级登录态**（核心）、
+  无缓存才抛出、超时不挂起（实测 308ms）
+- `tools/test-mp4.mjs` 改为 7 项：真实结构**必须能找到 moov**（防退化）+ 无 moov 时给中立诊断
+
+### 说明：本轮两路调研 Agent 均因 429 配额失败
+
+`dash-muxer`（DASH 无 moov 合并方案）与 `yutto-analyst`（yutto/yt-dlp 清晰度与错误码）都因
+模型配额超限失败（16:29 恢复）。**本轮所有结论均为主理人自己抓源码/实测得出，不是子代理产出。**
+
+### CI 自检
+
+**14 个套件**：validate 21 + core 57 + api 21 + resume 63 + resume-store 26 +
+routing 9 + quality-pick 14 + chapters 37 + mp4 7 + nav 11 + lint-noundef +
+e2e 29 + synthetic + package
+
 ## [1.4.4] - 2026-09-19
 
 ### 🔴 v1.0.0 至今的根 bug：merge 模式根本跑不通
