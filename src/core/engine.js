@@ -302,29 +302,43 @@ export class DownloadEngine {
       const staging = {};
 
       if (plan.mode === 'durl') {
-        const item = plan.durl[0];
-        task.totalBytes = item.size || 0;
+        // ★ 必须下载**全部分段**并依次拼接。
+        // 原来只下 durl[0]：但 refinePlanSizes 探测了所有分段、buildPlan 也返回了
+        // 完整的 durl 列表 —— 结果就是产出**只有第一段的截断文件**，而且进度永远
+        // 到不了 100%（totalBytes 只按第一段算）。
+        const segments = (plan.durl || []).filter((seg) => seg && seg.url);
+        if (!segments.length) throw new Error('durl 模式下没有可下载的分段');
+        const total = segments.reduce((sum, seg) => sum + (Number(seg.size) || 0), 0);
+        task.totalBytes = total || task.totalBytes || 0;
         const out = await this.createOutput({
           task,
           destination,
           name: `${task.filename}.mp4`,
           singleOutput: true,
-          sizeHint: item.size || 0,
+          sizeHint: total || 0,
           tempNames,
         });
         staging.video = out.sink;
-        await this.fetchTo({
-          urls: [item.url, ...item.backupUrls],
-          refreshUrls: () => refreshUrls('d'),
-          size: item.size,
-          sink: out.sink,
-          signal,
-          onProgress: (p) => {
-            task.speed = p.speed;
-            task.eta = p.eta;
-            refreshProgress();
-          },
-        });
+        let written = 0;
+        for (const seg of segments) {
+          await this.fetchTo({
+            urls: [seg.url, ...(seg.backupUrls || [])],
+            refreshUrls: () => refreshUrls('d'),
+            size: seg.size,
+            sink: out.sink,
+            // 关键：每段写到自己在整个文件里的位置，否则第二段会从 0 覆盖第一段
+            writeOffset: written,
+            signal,
+            onProgress: (p) => {
+              task.speed = p.speed;
+              task.eta = p.eta;
+              refreshProgress();
+            },
+          });
+          written += Number(seg.size) || 0;
+          if (task.canceled) throw new DownloadAborted();
+          refreshProgress();
+        }
         await this.finishOutput(out, task, destination, `${task.filename}.mp4`, 'video/mp4');
       } else if (audioOnly) {
         // 仅音频：单路下载，音轨原样落盘为 .m4a
@@ -696,6 +710,7 @@ export class DownloadEngine {
             const retried = await downloadRanged({
               urls: list,
               size: total,
+              writeOffset,
               sink,
               concurrency,
               signal,
@@ -1026,7 +1041,9 @@ export async function ensureSpecComplete(spec, api, isCanceled = () => false) {
  */
 export function buildPlan(playInfo, settings, spec) {
   if (playInfo.mode === 'durl' && playInfo.durl.length) {
-    const item = playInfo.durl[0];
+    // totalBytes 必须按**全部分段求和**：durl 可能是多段（长视频/番剧分段），
+    // 只算第一段会让进度永远到不了 100%，也让上层误判文件大小
+    const totalBytes = (playInfo.durl || []).reduce((sum, seg) => sum + (Number(seg?.size) || 0), 0);
     return {
       mode: 'durl',
       quality: playInfo.quality,
@@ -1034,7 +1051,7 @@ export function buildPlan(playInfo, settings, spec) {
       video: null,
       audio: null,
       durl: playInfo.durl,
-      totalBytes: item.size || 0,
+      totalBytes,
     };
   }
 
