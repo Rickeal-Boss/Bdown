@@ -155,11 +155,14 @@ console.log('\n[7] episode 形态（番剧 / 课程）');
 console.log('\n[8] 缺字段不写空标签（Jellyfin 对空值容忍度差）');
 {
   const nfo = buildNfo({ title: '只有标题' });
-  ok('没有空的 plot', !nfo.includes('<plot></plot>'));
-  ok('没有空的 year', !nfo.includes('<year></year>'));
-  ok('没有空的 runtime', !nfo.includes('<runtime></runtime>'));
-  ok('没有空的 thumb', !nfo.includes('<thumb'));
-  ok('没有空的 website', !nfo.includes('<website></website>'));
+  // 断言统一收紧为「元素完全不出现」而不是「不出现空标签」。
+  // 因为缺陷的实际形态往往是 <x>0</x> 或 <x> </x>（非空标签），
+  // 只查空标签会正好绕开 —— vStage 那次就是这个病的原型。
+  ok('没有 plot 元素', !nfo.includes('<plot'), nfo);
+  ok('没有 year 元素', !nfo.includes('<year'), nfo);
+  ok('没有 runtime 元素', !nfo.includes('<runtime'), nfo);
+  ok('没有 thumb 元素', !nfo.includes('<thumb'), nfo);
+  ok('没有 website 元素', !nfo.includes('<website'), nfo);
   // 注意断言要带闭合尖括号：根元素 <episodedetails> 本身就含子串 "<episode"，
   // 写成 includes('<episode') 会永远为真（假阳性），必须写 '<episode>'
   const zero = buildNfo({ title: 'x', duration: 0 });
@@ -171,6 +174,30 @@ console.log('\n[8] 缺字段不写空标签（Jellyfin 对空值容忍度差）'
   ok('仍然有 title', nfo.includes('<title>只有标题</title>'));
   ok('完全空输入也不崩', typeof buildNfo() === 'string' && buildNfo().includes('<movie>'));
   ok('空对象也不崩', buildNfo({}).includes('<movie>'));
+
+  // ★ <title> 是 Jellyfin/Kodi 的必需字段：没有它条目无法入库，整个 NFO 白写。
+  //   必须硬断言「一定存在且非空」，只查 '未知标题' 的邻近字符不算数。
+  ok('★ 空输入也一定有非空 title', buildNfo().includes('<title>未知标题</title>'), buildNfo());
+  ok('★ 空输入也一定有非空 title（硬断言：元素存在）', buildNfo().includes('<title>'), buildNfo());
+  ok('title 缺失时回退到 bvid',
+    buildNfo({ bvid: 'BV1xx411c7mD' }).includes('<title>BV1xx411c7mD</title>'),
+    buildNfo({ bvid: 'BV1xx411c7mD' }));
+  ok('title 与 bvid 都缺时回退到 av 号',
+    buildNfo({ aid: 2 }).includes('<title>av2</title>'), buildNfo({ aid: 2 }));
+  ok('tvshow 也保证非空 title', buildTvShowNfo({}).includes('<title>未知标题</title>'));
+}
+
+console.log('\n[8b] 换行处理：title 折叠成空格，plot 保留换行');
+{
+  const nfo = buildNfo({ title: '标题\n第二行', plot: '第一行\n第二行' });
+  const titleLine = (nfo.match(/<title>([\s\S]*?)<\/title>/) || [])[1] || '';
+  const plotLine = (nfo.match(/<plot>([\s\S]*?)<\/plot>/) || [])[1] || '';
+  ok('title 的换行被折叠成空格', !titleLine.includes('\n') && titleLine.includes(' '), titleLine);
+  ok('title 仍保留两行内容', titleLine.includes('标题') && titleLine.includes('第二行'), titleLine);
+  ok('plot **保留**换行（正常的段落分隔）', plotLine.includes('\n'), plotLine);
+  // 两者互锁：确认不是"全都折叠"或"全都不折叠"
+  ok('两者行为确实不同（互锁，防止一起改坏）',
+    !titleLine.includes('\n') && plotLine.includes('\n'));
 }
 
 console.log('\n[9] tvshow 形态');
