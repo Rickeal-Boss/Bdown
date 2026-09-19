@@ -161,6 +161,9 @@ export class DownloadEngine {
         aid: spec.aid,
         cid: spec.cid,
         epId: spec.epId,
+        // 课程（pugv）的必需参数。缺了它 api.playurl 不会走 /pugv 分支，
+        // 课程任务会以「缺少 cid」失败。
+        cheeseId: spec.cheeseId,
         qn: spec.quality > 0 ? spec.quality : 0,
         mode: settings.downloadMode === 'durl' ? 'durl' : 'dash',
       });
@@ -355,8 +358,11 @@ export class DownloadEngine {
         });
         await this.mergeInto({
           task,
-          vSink: vStage,
-          aSink: aStage,
+          // 注意：这里是 vPrep.sink / aPrep.sink（prepareStage 的返回值）。
+          // 曾经因为 prepareStage 重构（vStage→vPrep）时漏改这两行，
+          // 导致默认 merge 模式在合并阶段抛 ReferenceError、100% 失败。
+          vSink: vPrep.sink,
+          aSink: aPrep.sink,
           out,
           destination,
           filename: `${task.filename}.mp4`,
@@ -529,8 +535,14 @@ export class DownloadEngine {
         signal,
         onProgress: (p) => {
           // 分片完成时增量记录：p 里带 range 就记一段
-          if (resume && p && p.range && Number.isFinite(p.range.start) && Number.isFinite(p.range.end)) {
-            doneRanges = addRange(doneRanges, { start: p.range.start, end: p.range.end + 1 });
+          // 优先用 ranges（本次上报周期内完成的全部区间）；没有则退回单个 range。
+          const done = (p && Array.isArray(p.ranges)) ? p.ranges : (p && p.range ? [p.range] : null);
+          if (resume && done && done.length) {
+            for (const r of done) {
+              if (Number.isFinite(r.start) && Number.isFinite(r.end)) {
+                doneRanges = addRange(doneRanges, { start: r.start, end: r.end + 1 });
+              }
+            }
             // 不 await，避免拖慢下载；节流交给调用方（每 300ms 的 report）
             persistProgress().catch(() => {});
           }
@@ -589,7 +601,10 @@ export class DownloadEngine {
         saveAs: false,
         conflictAction: 'uniquify',
       });
-      setTimeout(() => URL.revokeObjectURL(url), 180_000);
+      // 延后回收 blob URL。原来是 180 秒，但用户若在「另存为」对话框里
+      // 停留超过 3 分钟，URL 已被回收 → 下载失败且报错难懂。改为 24 小时；
+      // 页面关闭时浏览器会统一回收，不会真的泄漏一整天。
+      setTimeout(() => URL.revokeObjectURL(url), 24 * 60 * 60 * 1000);
       return { path: filename, downloadId, bytes: blob.size };
     } catch (err) {
       URL.revokeObjectURL(url);
@@ -728,11 +743,26 @@ async function streamInto(writable, blob) {
  */
 export async function ensureSpecComplete(spec, api, isCanceled = () => false) {
   if (spec.cid) return spec;
-  if (!spec.bvid && !spec.aid) return spec;
+  // 课程只需要 cheeseId 就能反查 cid；其余类型至少要能定位到一个视频
+  if (!spec.bvid && !spec.aid && !spec.cheeseId) return spec;
   if (isCanceled()) return spec;
 
   let info = null;
   try {
+    if (spec.cheeseId) {
+      // 课程：用 /pugv/view/web/season?ep_id= 反查该集的 cid。
+      // 注：课程接口需要登录且通常是付费内容，这条路径**没有真机验证过**，
+      // 失败会 warn 并回退，不会让任务更糟。
+      const season = await api.cheeseSeason(spec.cheeseId);
+      const ep = (season?.episodes || []).find((e) => Number(e.id) === Number(spec.cheeseId));
+      if (ep && Number(ep.cid) > 0) {
+        spec.cid = Number(ep.cid);
+        if (!spec.title && ep.title) spec.title = ep.title;
+        return spec;
+      }
+      warn('课程：未能从 season 接口解析出 cid', 'cheeseId=' + spec.cheeseId);
+      return spec;
+    }
     info = await api.videoInfo({ bvid: spec.bvid, aid: spec.aid });
   } catch (err) {
     warn('补全任务规格失败（拿不到 cid）', err?.message);

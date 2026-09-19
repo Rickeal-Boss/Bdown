@@ -89,7 +89,16 @@ export class BiliApi {
       // 服务端对「没有任何视频标识（bvid/avid/ep_id/season_id）」的请求会返回
       // code=-400「请求错误」——这条信息会走 ERROR_MESSAGES 表被翻译成
       // 「请求参数错误」掩盖根因。本地先拦下，给具体提示（与 view 接口是否签名无关）。
-      const idKeys = Object.keys(params).filter((k) => ['bvid', 'avid', 'ep_id', 'season_id'].includes(k));
+      // 关键：必须「存在且**非空**」。只检查 key 会漏掉
+      // `{bvid: undefined}` / `{bvid: ''}` —— 这正是 cid 故障的原样翻版：
+      // key 在、值为空，闸门放行，signParams 又把空值悄悄丢掉，
+      // 请求发出去没有任何视频标识，B 站返 -400。
+      const idKeys = (() => {
+        const ID_KEYS = ['bvid', 'avid', 'ep_id', 'season_id'];
+        return Object.keys(params).filter((k) =>
+          ID_KEYS.includes(k)
+          && params[k] !== undefined && params[k] !== null && params[k] !== '');
+      })();
       if (!idKeys.length) {
         throw new BiliError(
           -400,
@@ -178,7 +187,8 @@ export class BiliApi {
       // service worker console 里查具体发了什么参数。
       if (json.code === -400) {
         const idKeys = Object.keys(params || {}).filter((k) => ['bvid', 'avid', 'ep_id', 'season_id'].includes(k));
-        const ids = Object.entries(params || {}).filter(([k]) => idKeys.includes(k)).map(([k, v]) => `${k}=${v}`);
+        // 过滤掉 undefined / 空串，避免输出「bvid=undefined 不存在」这种误导文案
+        const ids = idKeys.map((k) => `${k}=${params[k]}`);
         // 注：上一步本地预校验已经把「id 全缺」拦下了；到这里说明 id 已传，但 B 站仍返 -400
         if (ids.length === 0) {
           throw new BiliError(
@@ -380,8 +390,35 @@ export class BiliApi {
   }
 
   /** 番剧基础信息。 */
-  async seasonInfo(seasonId) {
-    return this.get('/pgc/view/web/season', { params: { season_id: seasonId } });
+  /**
+   * 番剧 season 信息。
+   *
+   * B 站的 `/pgc/view/web/season` **同时接受 `season_id` 与 `ep_id`**。
+   * popup 之前拿 `spec.epId` 去调它却塞进了 `season_id`，属于传错参。
+   * 这里按入参名分流，谁有值用谁。
+   */
+  async seasonInfo(seasonIdOrEpId, { epId } = {}) {
+    const params = {};
+    if (Number(seasonIdOrEpId) > 0) params.season_id = seasonIdOrEpId;
+    if (Number(epId) > 0) params.ep_id = epId;
+    return this.get('/pgc/view/web/season', { params });
+  }
+
+  /**
+   * 课程（pugv）season 信息，用于由 ep_id 反查该集的 cid。
+   * 对齐 DownKyi 的 `CheeseInfo`。**未真机验证**（课程通常是付费内容）。
+   */
+  async cheeseSeason(epId) {
+    const res = await this.get('/pugv/view/web/season', { params: { ep_id: epId } });
+    if (!res) return null;
+    return {
+      title: res.title || res.season_title || '',
+      episodes: Array.isArray(res.episodes) ? res.episodes.map((e) => ({
+        id: Number(e.id ?? e.episode_id ?? 0),
+        cid: Number(e.cid ?? 0),
+        title: e.title || '',
+      })) : [],
+    };
   }
 
   /** 用户投稿列表（用于 UP 主主页批量，可选功能）。 */

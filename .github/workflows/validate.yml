@@ -34,6 +34,11 @@ jobs:
       - name: playurl 路由自检（ugc / 番剧 / 课程三分支）
         run: node tools/test-playurl-routing.mjs
 
+      # 这条是「默认 merge 模式 100% 失败」那次 P0 的回归防护：
+      # node --check 抓不到读取未声明变量，必须真跑一遍四条分支。
+      - name: 引擎干跑（四条下载分支，防未声明变量回归）
+        run: node tools/test-engine-dryrun.mjs
+
       - name: 用合成 m4s 跑一遍混流器自检
         run: node tools/selftest-synthetic.mjs
 

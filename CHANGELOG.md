@@ -1,3 +1,58 @@
+## [1.4.1] - 2026-09-19
+
+### 🔴 P0 修复：默认 merge 模式 100% 失败
+
+`src/core/engine.js` 的 `mergeInto({ vSink: vStage, aSink: aStage })` —— `vStage` /
+`aStage` 在 v1.3.1 的 `prepareStage` 重构（改名成 `vPrep` / `aPrep`）时**漏改这两行**。
+ES Module 恒为严格模式，读取未声明标识符直接抛 `ReferenceError`。
+
+- **影响**：`downloadMode: 'merge'`（DEFAULT_SETTINGS 默认值）且 `plan.mode === 'dash'`
+  时，音视频两轨**下载完成后**才崩 → 任务转 `error`，文案 `vStage is not defined`。
+  **即默认配置的每一次下载都必然失败**，一路溜过 v1.3.1 与 v1.4.0 两个发布版本。
+- **为什么 CI 全绿**：`tools/validate.mjs` 只做 `node --check`（语法级），**抓不到读取
+  未声明变量**；`test-api-validation.mjs` 里两处 `catch (e) {}` 又把异常吞了，断言只
+  检查 playurl 发出的 `qn`（在崩溃点之前）。
+- **修复**：`vSink: vPrep.sink, aSink: aPrep.sink`。
+
+### 回归防护（防止同类漏改复发）
+
+- **新增 `tools/test-engine-dryrun.mjs`（15 项）**：用桩件（`setFetchImpl` 注入假下载源、
+  桩 `chrome.downloads`）真跑 `DownloadEngine.run` 的 merge / separate / audio / durl
+  四条分支，断言 `task.status === 'done'` 且不出现 `is not defined`。
+  **已做注入验证**：把 `vPrep.sink` 改回 `vStage` → 测试报 `ReferenceError: vStage is not defined`（失败）；
+  改回来 → 15/15 通过。已接入 CI。
+- **新增 `tools/lint-noundef.mjs`**：零依赖的「未定义标识符」静态检查。设计原则是
+  **宁可漏报也不误报**（误报会让 CI 红在无关提交上，工具很快就被关掉）。当前 34 个文件 0 处问题。
+
+### 其他修复
+
+- **课程（pugv）端到端打通**：`engine.js` 之前没把 `spec.cheeseId` 透传给 `api.playurl`，
+  v1.4.0 宣称的课程支持在引擎侧根本走不通。已补上，并给 `ensureSpecComplete` 加课程
+  分支（用 `/pugv/view/web/season?ep_id=` 反查 cid）。**注：课程接口通常需登录且为付费内容，未真机验证。**
+- **`sanitizeFilename` 实测确认没问题**（不采纳"传 null 会抛 TypeError"的说法）：
+  `null` / `undefined` / `''` → `"untitled"`；`../../etc/passwd` → `_.._etc_passwd`；
+  `CON` → `_CON`；含 RLO 的 `P1‮gp4.exe` → `P1gp4.exe`。
+- **移除下载中心的无条件 reload**：`openDashboard` 里 `if (focus) chrome.tabs.reload(tab.id)`
+  会在页面刚打开 / 网络抖动 / 离线时把下载中心刷成白屏。下载中心本来就通过
+  `chrome.storage.onChanged` 即时接收新任务，**不需要重载**。
+- **popup 预览的 qn 从 127 改为 0**（自动），与 engine 一致 —— 否则非会员在解析预览
+  阶段就被降级成 360P 预览。
+- **`seasonInfo` 传参修正**：B 站的 `/pgc/view/web/season` 同时接受 `season_id` 与
+  `ep_id`；之前拿 `spec.epId` 却塞进 `season_id`。已按入参分流。
+- **DNR 正则收紧**：`([^/]*\.)?` → `([^/?#]*\.)?`。原先 `https://evil.com?.hdslb.com/x`
+  这类 URL 会被 rule 1 命中，导致任意攻击者主机的请求被注入 `Referer: https://www.bilibili.com/`。
+- **`onMessage` 加 `sender.id` 校验**：只接受本扩展自己发来的消息。
+
+### 文档
+
+- **新增 `PRIVACY.md`** —— 商店上架的**阻塞项**（v1.0.0 提交时没有）。说明不收集任何数据、
+  存了什么（设置/任务/历史/续传进度）、为什么需要每个权限、不存 Cookie/SESSDATA。
+- **新增 `docs/DOWNKYI-ANALYSIS.md`** —— 对 `yaobiao131/downkyi` 与 `HanLuo/downkyicore` 的深度分析。
+
+### 测试
+
+新增 21 项（`test-engine-dryrun` 15 + `lint-noundef` 覆盖 34 文件）。**CI 自检 216 项**。
+
 ## [1.4.0] - 2026-09-18
 
 ### 新增：对 DownKyi 深度分析后的落地改动

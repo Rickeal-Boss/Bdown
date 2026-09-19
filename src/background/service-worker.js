@@ -21,7 +21,10 @@ async function openDashboard(pendingTasks = [], { focus = true } = {}) {
     const tab = tabs[0];
     if (focus) await chrome.tabs.update(tab.id, { active: true });
     await chrome.windows.update(tab.windowId, { focused: focus });
-    if (focus) await chrome.tabs.reload(tab.id);
+    // 注意：这里曾经无条件 `chrome.tabs.reload(tab.id)`。下载中心已经通过
+    // `chrome.storage.onChanged` 即时接收新任务，**不需要重载**；而重载会在
+    // 页面刚打开 / 网络抖动 / 离线时把下载中心刷成白屏，还会丢失正在跑的
+    // 任务状态（内存态）。已移除——新任务靠 storage 消息驱动。
     return tab.id;
   }
   const tab = await chrome.tabs.create({ url: DASHBOARD_URL, active: focus });
@@ -136,6 +139,9 @@ const handlers = {
 };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    // 只接受本扩展自己（各页面/内容脚本）发来的消息。未声明 externally_connectable，
+    // 网页本来调不到；但同浏览器里的其他扩展可以，故显式校验 sender.id。
+    if (!msg || sender?.id !== chrome.runtime.id) return false;
   const handler = handlers[msg?.type];
   if (!handler) return false;
   Promise.resolve(handler(msg, sender))

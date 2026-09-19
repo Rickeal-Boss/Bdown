@@ -190,13 +190,6 @@ async function main() {
     }
   }
 
-  console.log('\n' + (fail === 0 ? '\u2705' : '\u274c') + ' api 预校验自检' +
-    (fail === 0 ? '完成，失败 0 项' : '完成，失败 ' + fail + ' 项') +
-    '（通过 ' + pass + '）\n');
-  process.exit(fail === 0 ? 0 : 1);
-}
-
-main();
   // 场景 9：engine.run 在 spec.quality=0 时发 qn=0（不再强制 127）
   {
     let qnSent = null;
@@ -265,4 +258,10 @@ main();
     }
   }
 
+  console.log('\n' + (fail === 0 ? '\u2705' : '\u274c') + ' api 预校验自检' +
+    (fail === 0 ? '完成，失败 0 项' : '完成，失败 ' + fail + ' 项') +
+    '（通过 ' + pass + '）\n');
+  process.exit(fail === 0 ? 0 : 1);
+}
 
+main();

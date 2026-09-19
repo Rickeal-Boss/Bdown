@@ -84,9 +84,14 @@ async function parseManual(text) {
 async function loadVideo() {
   try {
     const spec = currentSpec;
-    if (spec.epId) {
-      const season = await api.seasonInfo(spec.epId);
-      const ep = (season.result?.episodes || []).find((e) => e.ep_id === spec.epId) || season.result?.episodes?.[0];
+    // 番剧：seasonId（/bangumi/play/ss<id>）与 epId（ep<id>）都要能进。
+    // B 站的 /pgc/view/web/season 同时接受 season_id 与 ep_id，
+    // seasonInfo() 已按入参分流，这里把两个 id 都传下去。
+    if (spec.epId || spec.seasonId) {
+      const season = await api.seasonInfo(spec.seasonId, { epId: spec.epId });
+      const eps = season.result?.episodes || [];
+      // 有 epId 就精确匹配，只有 ss<id> 时取第一集
+      const ep = (spec.epId ? eps.find((e) => e.ep_id === spec.epId) : null) || eps[0];
       if (!ep) throw new Error('未找到该番剧剧集');
       videoInfo = {
         bvid: ep.bvid,
@@ -100,7 +105,7 @@ async function loadVideo() {
         pages: [{ page: 1, part: ep.title, cid: ep.cid, duration: ep.duration ? Math.round(ep.duration / 1000) : 0 }],
         epId: ep.ep_id,
       };
-      currentSpec = { ...spec, bvid: ep.bvid, aid: ep.aid, epId: ep.ep_id };
+      currentSpec = { ...spec, bvid: ep.bvid, aid: ep.aid, epId: ep.ep_id, seasonId: spec.seasonId };
     } else {
       videoInfo = await api.videoInfo(spec);
     }
@@ -110,7 +115,8 @@ async function loadVideo() {
       aid: videoInfo.aid,
       cid: videoInfo.pages[spec.pageIndex]?.cid || videoInfo.cid,
       epId: currentSpec.epId,
-      qn: 127,
+      cheeseId: currentSpec.cheeseId, // 课程必需，缺了 playurl 走不到 /pugv 分支
+      qn: 0, // 0 = 自动：让 api.playurl 按账号（大会员/非会员）挑上限
       mode: 'dash',
     });
 
