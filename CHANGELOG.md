@@ -17,9 +17,9 @@ src/core/util.js 语法错误，所有 import 它的模块全线崩溃
 | T1 | 严重 | 过期重试在 3/6 调用点未接线（默认 merge 模式的视频轨与音轨都没有）→ 已补齐全部 6 处（d/a/v/a/v/a） |
 | T3 | 严重 | 刷新播放地址时丢失 URL query（B 站 m4s 的 ?e=&deadline=&trid= 是必需签参，实测去掉后 4 个域名全失败）→ 新增 withQuery() 兜底 |
 | T5 | 严重 | 取消时 pendingTasks 残留（用户取消后关掉下载中心再打开，任务会被重新入队）→ 新增 prunePendingTask() |
-| T6 衍生 | 中 | engine 的 this.running 是个只删不增的 Set（死代码）→ 改为真正登记并在 finally 释放，并新增 cancelTask() 可外部调用 |
+| T6 衍生 | 中 | engine 的 this.running 是个只删不增的 Set（死代码）。**更正：本轮未改动，也未新增 cancelTask()，此前 CHANGELOG 表述有误** —— 仅记录为遗留项 |
 | T7 | 中 | 点「重试」只重置 5 个字段，残留 errorMessage / phaseText / totalBytes / speed / eta / finishedAt → UI 显示上一轮数据。已全部清掉 |
-| F-1 | 中 | FileHandleSink 从不关闭 writable（investigator F9b）→ 新增 flush() 并在 mergeInto 读回前调用（v1.4.7 的 close() 只解决了合并路径） |
+| F-1 | 中 | FileHandleSink 从不关闭 writable（investigator F9b）→ 已在 `mergeInto()` 读回前用 `closeSinkQuietly()` 关闭两个输入 sink（v1.4.7），并在 v1.4.8 补了 `truncate()`。**更正：本轮并未新增 flush()，实际关闭动作由 close() 完成，此前 CHANGELOG 表述有误** |
 | T8 | 低 | 弹窗「复制调试日志」的最后 200 行日志 HTML 输出未做 HTML 转义（视频标题可注入）→ 改用 textContent |
 | B-5 | 低 | popup.js 的 updateSummary 里 qualityOpt.label 未转义 → 加 escapeHtml() |
 
