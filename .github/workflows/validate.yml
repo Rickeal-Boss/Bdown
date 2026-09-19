@@ -53,6 +53,10 @@ jobs:
       - name: 片段扫描回归（大 moof 不被丢弃 / 截断文件必报错）
         run: node tools/test-mp4-fragments.mjs
 
+      # durl 可能是多段；只下第一段会产出截断文件且进度永远到不了 100%
+      - name: durl 多段下载回归（全部分段拼接，不互相覆盖）
+        run: node tools/test-durl-multipart.mjs
+
       # 防「已登录用户被误判成未登录」导致清晰度降级（1080P -> 720P）
       - name: nav 健壮性自检（超时/重试/响应校验 + 抖动时不降级登录态）
         run: node tools/test-nav.mjs
