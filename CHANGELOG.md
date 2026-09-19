@@ -1,3 +1,40 @@
+## [1.4.6] - 2026-09-19
+
+### 新增：播放地址过期（403/404）自动刷新重试
+
+B 站 CDN 的播放地址约 **120 分钟**失效（文档明文：「获取 url 有效时间为 120min，
+超时失效需要重新获取」），失效后服务器返回 **403**（也可能 404）。
+
+**原实现的问题**：拿到 403 后只用**同一个过期地址**重试 2 次，再回退顺序下载
+（还是那个地址）—— 必然全部失败。典型场景：大文件下到一半、断点续传跨会话、
+或解析完隔了一阵才开始下。
+
+**修复**：
+- `downloader.js` 的 HTTP 错误现在**带 `status`**（新增 `httpError(res)`），
+  且重新包装成「分片 X-Y 下载失败：...」时**保留 status**
+  （原来这里会丢，导致过期判断永远不触发）
+- `engine.js` 新增 `isUrlExpiredError(err)`：403 / 404 / 410 判定为地址过期
+- `fetchTo()` 新增可选 `refreshUrls` 回调：检测到过期就重新 playurl 换一批地址，
+  重置 sink 后重试**一次**（不无限重试）
+- `run()` 为视频轨 / 音频轨各接上 `refreshUrls`，刷新时重新 `playurl` +
+  `buildPlan` 取对应轨道的新地址（含 backupUrls）
+
+**兼容性**：不传 `refreshUrls` 时沿用旧行为（仍会抛错，不会假装成功）。
+
+### 测试
+
+- 新增 `tools/test-url-refresh.mjs`（12 项），已接入 CI：
+  - `isUrlExpiredError` 判定（403/404/410 是，500/网络错误不是，undefined 不崩）
+  - **核心**：403 → 刷新地址 → 重试成功，且确实请求过新地址
+  - 不提供 `refreshUrls` 时仍抛错（不假装成功）
+  - 刷新后仍失败 → 最终抛错且 `refreshUrls` 最多调用 1 次（不无限循环）
+
+### CI 自检
+
+**15 个套件**：validate 21 + core 57 + api 21 + resume 63 + resume-store 26 +
+routing 9 + quality-pick 14 + chapters 37 + mp4 7 + nav 11 + url-refresh 12 +
+lint-noundef + e2e 29 + synthetic + package
+
 ## [1.4.5] - 2026-09-19
 
 ### 🔴 修复「获取登录信息失败导致使用问题」—— 已登录用户被误判成未登录

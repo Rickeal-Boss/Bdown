@@ -49,6 +49,11 @@ jobs:
       - name: nav 健壮性自检（超时/重试/响应校验 + 抖动时不降级登录态）
         run: node tools/test-nav.mjs
 
+      # B 站 CDN 地址约 120 分钟失效（403/404）：必须重新 playurl 换地址，
+      # 拿同一个过期地址重试必然全败
+      - name: 播放地址过期刷新自检（403/404 -> refreshUrls 重试）
+        run: node tools/test-url-refresh.mjs
+
       # —— 以下两条是「默认 merge 模式 100% 失败」那次 P0 的回归防护 ——
       # 那次的根因：engine.js 重构（vStage→vPrep）漏改两行，`node --check`
       # 语法完全合法、导入图检查也通过，但 ESM 严格模式下运行时 ReferenceError。

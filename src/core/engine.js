@@ -90,6 +90,26 @@ export class Task {
  * @property {FileSystemDirectoryHandle} [dir]
  */
 
+/**
+ * 判断下载失败是否由「播放地址过期」引起。
+ * B 站 CDN 地址约 120 分钟失效，失效后服务器返回 403（也可能 404）。
+ */
+export function isUrlExpiredError(err) {
+  const st = Number(err?.status);
+  if (!Number.isFinite(st)) return false;
+  return st === 403 || st === 404 || st === 410;
+}
+
+/** 把 sink 恢复到「刚建好」的状态，便于从头重下。 */
+function resetSink(sink) {
+  if (sink instanceof MemorySink) {
+    sink.records = [];
+    sink.size = 0;
+  } else if (sink instanceof FileHandleSink) {
+    sink.size = 0;
+  }
+}
+
 export class DownloadEngine {
   /**
    * @param {{ api?: BiliApi, settings: object, onUpdate?: (task: Task) => void }} o
@@ -171,6 +191,28 @@ export class DownloadEngine {
       if (task.canceled) throw new DownloadAborted();
 
       const plan = buildPlan(playInfo, settings, spec);
+
+      /**
+       * 播放地址过期时重新拿一批。
+       * B 站 CDN 地址约 120 分钟失效（表现为 403/404），这时必须重新 playurl，
+       * 而不是拿同一个过期地址重试。
+       * @param {'v'|'a'} side
+       */
+      const refreshUrls = async (side) => {
+        const fresh = await api.playurl({
+          bvid: spec.bvid,
+          aid: spec.aid,
+          cid: spec.cid,
+          epId: spec.epId,
+          cheeseId: spec.cheeseId,
+          qn: spec.quality > 0 ? spec.quality : 0,
+          mode: settings.downloadMode === 'durl' ? 'durl' : 'dash',
+        });
+        const fp = buildPlan(fresh, settings, spec);
+        const track = side === 'a' ? fp.audio : fp.video;
+        if (!track) return [];
+        return [track.url, ...(track.backupUrls || [])].filter(Boolean);
+      };
       task.quality = plan.quality;
       task.codec = plan.codec;
       task.totalBytes = plan.totalBytes;
@@ -248,6 +290,7 @@ export class DownloadEngine {
         staging.audio = out.sink;
         await this.fetchTo({
           urls: [plan.audio.url, ...plan.audio.backupUrls],
+          refreshUrls: () => refreshUrls('a'),
           size: plan.audio.size,
           sink: out.sink,
           signal,
@@ -274,6 +317,7 @@ export class DownloadEngine {
         staging.video = vOut.sink;
         await this.fetchTo({
           urls: [plan.video.url, ...plan.video.backupUrls],
+          refreshUrls: () => refreshUrls('v'),
           size: plan.video.size,
           sink: vOut.sink,
           signal,
@@ -510,8 +554,15 @@ export class DownloadEngine {
    * 并随分片完成增量更新清单——这样中途取消 / 崩溃后下次能接着下。
    * 默认关闭（settings.resumeEnabled），因为浏览器端行为还没法在 CI 里验证。
    */
-  async fetchTo({ urls, size, sink, onProgress, signal, probe = true, resume = null }) {
-    const list = (urls || []).filter(Boolean);
+  /**
+   * @param {object} o
+   * @param {string[]} o.urls
+   * @param {(() => Promise<string[]>)|null} [o.refreshUrls]
+   *   当下载因 **URL 过期** 失败（B 站 CDN 地址约 120 分钟失效，表现为 403/404）时，
+   *   调用它重新拿一批地址并重试一次。不传则沿用旧行为（只重试同一批地址，必然全败）。
+   */
+  async fetchTo({ urls, size, sink, onProgress, signal, probe = true, resume = null, refreshUrls = null }) {
+    let list = (urls || []).filter(Boolean);
     if (!list.length) throw new Error('没有可用的下载地址');
     let total = size;
     if (!total && !probe) {
@@ -522,6 +573,7 @@ export class DownloadEngine {
 
     /** 已完成的区间（续传时非空） */
     let doneRanges = resume && resume.ranges ? [...resume.ranges] : [];
+    let refreshUrlsUsed = 0;
     const persistProgress = async () => {
       if (!resume || !resume.store || !resume.key) return;
       await resume.store.write(resume.key, { size: total, ranges: doneRanges });
@@ -560,9 +612,42 @@ export class DownloadEngine {
         await persistProgress().catch(() => {});
         throw err;
       }
+      // B 站 CDN 地址约 120 分钟失效，失效后返回 403 / 404。
+      // 这时拿同一个过期地址重试毫无意义——必须重新 playurl 换一批地址。
+      const expired = isUrlExpiredError(err);
+      if (expired && refreshUrls && refreshUrlsUsed < 1) {
+        refreshUrlsUsed += 1;
+        try {
+          warn('播放地址疑似过期（' + err.status + '），重新获取地址后重试', err.message);
+          const fresh = (await refreshUrls()) || [];
+          const next = fresh.filter(Boolean);
+          if (next.length) {
+            list = next;
+            total = size;
+            doneRanges = [];
+            resetSink(sink);
+            if (resume) await resume.store.clear(resume.key).catch(() => {});
+            const retried = await downloadRanged({
+              urls: list,
+              size: total,
+              sink,
+              concurrency,
+              signal,
+              onProgress,
+              probe,
+              resumeRanges: null,
+            });
+            if (resume) await resume.store.clear(resume.key);
+            return retried;
+          }
+        } catch (e2) {
+          warn('刷新播放地址后重试仍失败', e2?.message);
+          err = e2;
+        }
+      }
+
       warn('分片下载失败，回退到顺序下载', err.message);
-      if (sink instanceof MemorySink) sink.records = [];
-      if (sink instanceof FileHandleSink) sink.size = 0;
+      resetSink(sink);
       // 回退顺序下载时不能续传（会重下整个文件），清掉清单避免半份残留
       if (resume) await resume.store.clear(resume.key).catch(() => {});
       return downloadSequential({ urls: list, sink, signal, onProgress });

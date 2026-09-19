@@ -29,6 +29,19 @@ let injectedFetch = null;
 export function setFetchImpl(fn) {
   injectedFetch = fn;
 }
+/**
+ * 抛出一个**带 status 的** HTTP 错误。
+ *
+ * 为什么要带 status：B 站 CDN 的播放地址约 120 分钟失效，失效后返回 403 / 404。
+ * 上层（engine.fetchTo）需要据此判断「是 URL 过期」而不是网络抖动，
+ * 从而重新 playurl 换一批地址再试——否则只是拿同一个过期地址重试 2 次，必然全败。
+ */
+function httpError(res) {
+  const err = new Error(`HTTP ${res.status}`);
+  err.status = res.status;
+  return err;
+}
+
 function doFetch(url, init) {
   return (injectedFetch || globalThis.fetch)(url, init);
 }
@@ -62,7 +75,9 @@ export async function probeSize(url, { signal, referer } = {}) {
     signal,
   });
   if (!res.ok && res.status !== 206) {
-    throw new Error(`探测文件大小失败：HTTP ${res.status}`);
+    const e = httpError(res);
+    e.message = `探测文件大小失败：${e.message}`;
+    throw e;
   }
   const range = res.headers.get('Content-Range'); // bytes 0-0/12345
   let size = 0;
@@ -218,7 +233,7 @@ export async function downloadRanged({
       signal: workerSignal,
     });
     if (res.status !== 206 && res.status !== 200) {
-      throw new Error(`HTTP ${res.status}`);
+      throw httpError(res);
     }
     const buf = await res.arrayBuffer();
     const bytes = new Uint8Array(buf);
@@ -269,7 +284,11 @@ export async function downloadRanged({
         }
       }
       if (lastError) {
-        throw new Error(`分片 ${range.start}-${range.end} 下载失败：${lastError.message}`);
+        const e = new Error(`分片 ${range.start}-${range.end} 下载失败：${lastError.message}`);
+        // **必须保留 status**：上层靠它判断是不是「播放地址过期」（403/404）。
+        // 之前这里重新 new Error 时把 status 丢了，导致过期重试永远不会触发。
+        if (lastError.status !== undefined) e.status = lastError.status;
+        throw e;
       }
     }
   };
@@ -309,7 +328,7 @@ export async function downloadSequential({
         cache: 'no-store',
         signal,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw httpError(res);
       const total = Number(res.headers.get('Content-Length') || 0) || knownSize;
       const reader = res.body.getReader();
       for (;;) {
