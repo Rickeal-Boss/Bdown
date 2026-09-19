@@ -1,5 +1,39 @@
 ## [1.4.10] - 2026-09-19
 
+### P0 修 v1.4.9 引入的致命问题：util.js 被真实控制字符写坏
+
+给 warn() 加日志清洗时，脚本里写的转义序列（形如 U+0000）被工具链
+**解释成了真正的控制字符（NUL / 0x1F / 0x7F）写入源码**，导致
+src/core/util.js 语法错误，所有 import 它的模块全线崩溃
+（validate 一度报 22 项检查失败 10 项）。
+
+已重写为用 String.fromCharCode 构造正则，源码里不出现任何反斜杠转义。
+实测：warn 收到含回车的消息时输出 <0x0d> 这样的可见形式。
+
+教训（同一坑第三次）：
+1. 通过 shell heredoc 写 JS 源码时，反斜杠转义会被解释成真实字符；
+   以后这类代码一律用字符码构造。
+2. 我把修改直接用 git add -A 提交了，坏版本进了 HEAD，git checkout 救不回来，
+   只能手工重写 —— **提交前必须先跑静态校验**。
+
+### 本轮修复（来自 QA 应用层审查 + 排障手）
+
+| 项 | 内容 |
+|---|---|
+| T3 | 刷新播放地址时丢失 URL query。B 站 m4s 的 ?e=...&deadline=...&trid=... 是必需签参（QA 实测去掉后 4 个域名全部失败）。新增 withQuery()：新地址不带 ? 时用旧地址的 query 补上 |
+| B-5 | popup.js 的 updateSummary() 里 qualityOpt.label 未转义 -> 加 escapeHtml() |
+| T5 | 取消/完成/失败后 chrome.storage 的 pendingTasks 条目未清理 -> 关掉下载中心再打开会被重新入队。新增 prunePendingTask()，在 startTask 的 finally 按 cid + pageIndex 清理 |
+| T7 | 点「重试」只重置 5 个字段，残留 errorMessage / phaseText / totalBytes / speed / eta / finishedAt -> UI 显示上一轮数据。已全部清掉 |
+| T8 | warn() 把控制字符转成可见的 <0x0d>，避免 B 站返回内容里的回车把 DevTools 日志截断覆盖 |
+
+### 未采纳（已核实不成立）
+
+- T6「取消后 this.running.get(promise) 永久悬挂」：engine.js 的 this.running
+  只是个 Set（且只删不增），不存在 running.get()；取消路径会捕获
+  DownloadAborted 并正常返回。未复现，未改动。
+
+## [1.4.10] - 2026-09-19
+
 ### P0 修 v1.4.9 引入的致命问题：util.js 被控制字符写坏
 
 给 `warn()` 加日志清洗时，我在脚本里写了形如 U+0000 的转义序列，
