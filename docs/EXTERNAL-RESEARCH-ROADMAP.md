@@ -78,3 +78,54 @@
 - [ ] Gitee 上的同类项目（本轮未取到，沙箱访问受限）
 - [ ] 浏览器扩展形态的 B 站下载器调研（子代理因 429 配额失败，配额 2026-09-19 16:29 后重试）—— 重点想验证"DNR 静态规则 vs session 动态规则 + `initiatorDomains`"
 - [ ] `yutto-dev/yutto`（这轮没查成，功能面广，值得一并对照）
+
+
+---
+
+## 接口探路实测结论（2026-09-19 补充）
+
+> 这一节的价值在于：**避免后人照着已归档的仓库去实现，对着死端点写一堆代码**。
+> 教训来源：BBDown 已于 2026-05 归档，它用的 `/x/player.so` 现在直接 404。
+
+### 批量入口三条路线的实测
+
+| 候选 | 端点 | 实测结果 | 结论 |
+|---|---|---|---|
+| UP 主空间批量 | `/x/space/wbi/arc/search` | **-352 风控校验失败**；参数补齐后变成 **HTTP 412**（WAF 页） | 排除 |
+| UP 主信息（粉丝数） | `/x/space/wbi/acc/info` | **-352 风控校验失败** | 排除 |
+| 关注数 | `/x/relation/stat` | **code 0，可用** | 可用（但价值低） |
+| 互动视频分支展开 | `/x/player.so` | **HTTP 404**（返回 HTML 错误页），拿不到 `graph_version` | 排除 |
+| 互动视频分支列表 | `/x/stein/edgeinfo_v2` | 依赖 `graph_version`，上游 404 所以拿不到 | 连带不可用 |
+| **合集（ugc_season）** | `/x/web-interface/wbi/view/detail` 的 `ugc_season` | **code 0，不受 -352 影响**，随当前视频一起返回 | **已实现（v1.4.14）** |
+
+**重要边界**：上述 -352 / 412 都是在**沙箱（无登录 cookie）**下测的。
+-352 与 412 都可能与"未登录 / 缺 `buvid3` 指纹"有关，**已登录的真机里可能可用**。
+所以这里的结论应读作「沙箱下被拒、需真机确认」，而不是「确定不可用」。
+真机只需在 DevTools 跑一次 `/x/space/wbi/arc/search` 看 `code` 是否为 0 即可定论。
+
+### 互动视频的替代线索
+
+`view` 响应里有个 **`stein_guide_cid`** 字段（互动视频的引导 cid）。
+实测（BV1xDgL6SEzk）：`cid=41156151510`、`stein_guide_cid=99543100`
+**两者都能取到 DASH 流**（code 0，视频轨 id 均为 `[32,32,32,16,16,16]`）。
+
+这比已失效的 `/x/player.so` 靠谱，是将来做互动视频的入口：
+- 最小可用：把入口视频 + 引导视频都下下来
+- 完整方案：需要能枚举分支节点，目前无可用端点
+
+### 真实互动视频样本（供后续验证）
+
+- `BV1xDgL6SEzk`（cid 41156151510，`rights.is_stein_gate = 1`）
+- `BV1gyY26vEYE`、`BV1NRju6LEmZ`、`BV18ug66REzE`、`BV1vb4y1r7cg` 同样是互动视频
+
+获取方式：`/x/web-interface/wbi/search/type?search_type=video&keyword=互动视频`
+
+### 真实合集样本
+
+- `BV1Wi4y1k7ed`：合集 id 2563105，《成人拼音打字速学教程系列视频》，**7 集**
+- 字段结构：`ugc_season.sections[].episodes[]`，每集 `bvid`/`aid`/`cid`/`title`
+  （`duration` 与封面在 `arc.duration` / `arc.pic`，**不在 episode 顶层**）
+
+### 真机验证清单
+
+见 `docs/MANUAL-VERIFICATION.md` —— 上架前必须走完 A 组（大文件 merge + 清晰度）。
