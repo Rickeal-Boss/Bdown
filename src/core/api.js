@@ -336,7 +336,15 @@ export class BiliApi {
    * @returns {Promise<PlayInfo>}
    */
   async playurl({ bvid, aid, cid, qn = 127, mode = 'dash', epId, cheeseId, fourk = 1 }) {
-    const logged = await this.ensureAccount().then((a) => a.isLogin).catch(() => false);
+    // 三态：true=已确认登录 / false=已确认未登录 / null=**拿不到登录态**（nav 失败且无缓存）
+    //
+    // 为什么不能用二态：nav 偶发失败（WAF / 断网）时如果一律当"未登录"，
+    // playurl 就会带上 `try_look=1`（B 站的"未登录试看"参数），服务端很可能
+    // 只返回低清试看流 —— 用户明明登录了却下到 360P，且完全不知道原因。
+    // 拿不到登录态时要**保守**：不带 try_look，把判断权留给服务端 Cookie。
+    const logged = await this.ensureAccount()
+      .then((a) => (a && typeof a.isLogin === 'boolean' ? a.isLogin : null))
+      .catch(() => null);
     // 自动清晰度的取值（qn=0 表示「让客户端按账号挑」）。
     //
     // B 站的清晰度上限规则：
@@ -374,7 +382,9 @@ export class BiliApi {
     };
     if (bvid) params.bvid = bvid;
     else if (aid) params.avid = aid;
-    if (!logged) params.try_look = 1;
+    // 只在**确认**未登录时才带 try_look；登录态未知（logged === null）时不带，
+    // 让服务端按请求里的 Cookie 自行判断，避免误拿试看流
+    if (logged === false) params.try_look = 1;
 
     // 课程（pugv）：DownKyi 的注释明确写了「必须有 episodeId，否则会返回请求
     // 错误（code -400）」—— 所以 cheeseId 是必填，不能像番剧那样只给 cid。

@@ -73,4 +73,31 @@ console.log('\n[4] 课程（pugv）的 fnval 与 yt-dlp 对齐');
 }
 
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 清晰度挑选测试${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);
+
+console.log('\n[5] buildPlan 的清晰度降级不能静默掉到最低档（360P 事故）');
+{
+  const { buildPlan } = await import('../src/core/engine.js');
+  const mk = (qs) => qs.map((q) => ({
+    quality: q, id: q, codecid: 7, bandwidth: 1000 + q, url: 'https://cdn/v', backupUrls: [], size: 1000,
+  }));
+  const audio = [{ quality: 30280, id: 30280, codecid: 0, url: 'https://cdn/a', backupUrls: [], size: 100 }];
+  const SET = { downloadMode: 'merge', preferCodec: 'avc', audioPreference: 'normal' };
+  const plan = (pi, spec) => buildPlan({ mode: 'dash', videos: [], audios: audio, ...pi }, SET, spec);
+
+  const auto = plan({ acceptQuality: [], videos: mk([16, 32]) }, { quality: 0 });
+  ok('accept 为空 + 自动 -> 取实际最高档 32，而不是 videos[0] 的 16',
+    auto.quality === 32 && auto.video?.quality === 32, 'quality=' + auto.quality + ' track=' + auto.video?.quality);
+
+  const hi = plan({ acceptQuality: [32, 16], videos: mk([32, 16]) }, { quality: 125 });
+  ok('请求 125（不可得）-> 降到不超过它的最高档 32，而不是最低档 16',
+    hi.video?.quality === 32, 'track=' + hi.video?.quality);
+
+  const lo = plan({ acceptQuality: [80, 64], videos: mk([80, 64]) }, { quality: 16 });
+  ok('请求 16（低于全部档位）-> 取最接近的 64，不是末位', lo.video?.quality === 64, 'track=' + lo.video?.quality);
+
+  const fake = plan({ acceptQuality: [125, 116, 80, 64, 32, 16], videos: mk([32, 16]) }, { quality: 0 });
+  ok('宣称 125 但实际只有 32/16 -> 取 32（不虚报）', fake.video?.quality === 32, 'track=' + fake.video?.quality);
+}
+
+console.log('\n' + (fail === 0 ? '✅ 清晰度挑选测试完成，失败 0 项' : '❌ 清晰度挑选测试完成，失败 ' + fail + ' 项') + '（通过 ' + pass + '）' + '\n');
 process.exit(fail === 0 ? 0 : 1);

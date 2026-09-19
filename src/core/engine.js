@@ -115,13 +115,18 @@ async function closeSinkQuietly(sink, label = 'sink') {
   }
 }
 
-/** 把 sink 恢复到「刚建好」的状态，便于从头重下。 */
-function resetSink(sink) {
+/**
+ * 把 sink 恢复到「刚建好」的状态，便于从头重下。
+ *
+ * 注意 FileHandleSink **必须真的截断文件**：只把 `size` 归零而不截断，
+ * 覆盖写不会缩短文件，新内容更短时尾部会残留上一轮的字节。
+ */
+async function resetSink(sink) {
   if (sink instanceof MemorySink) {
     sink.records = [];
     sink.size = 0;
   } else if (sink instanceof FileHandleSink) {
-    sink.size = 0;
+    await sink.truncate(0);
   }
 }
 
@@ -224,6 +229,12 @@ export class DownloadEngine {
           mode: settings.downloadMode === 'durl' ? 'durl' : 'dash',
         });
         const fp = buildPlan(fresh, settings, spec);
+        // durl（单文件直下）没有 video/audio 轨，取 durl[0]
+        if (side === 'd') {
+          const item = (fp.durl || [])[0];
+          if (!item) return [];
+          return [item.url, ...(item.backupUrls || [])].filter(Boolean);
+        }
         const track = side === 'a' ? fp.audio : fp.video;
         if (!track) return [];
         return [track.url, ...(track.backupUrls || [])].filter(Boolean);
@@ -282,6 +293,7 @@ export class DownloadEngine {
         staging.video = out.sink;
         await this.fetchTo({
           urls: [item.url, ...item.backupUrls],
+          refreshUrls: () => refreshUrls('d'),
           size: item.size,
           sink: out.sink,
           signal,
@@ -355,6 +367,7 @@ export class DownloadEngine {
         staging.audio = aOut.sink;
         await this.fetchTo({
           urls: [plan.audio.url, ...plan.audio.backupUrls],
+          refreshUrls: () => refreshUrls('a'),
           size: plan.audio.size,
           sink: aOut.sink,
           signal,
@@ -377,6 +390,7 @@ export class DownloadEngine {
         staging.video = vPrep.sink;
         await this.fetchTo({
           urls: [plan.video.url, ...plan.video.backupUrls],
+          refreshUrls: () => refreshUrls('v'),
           size: plan.video.size,
           sink: vPrep.sink,
           signal,
@@ -395,6 +409,7 @@ export class DownloadEngine {
         staging.audio = aPrep.sink;
         await this.fetchTo({
           urls: [plan.audio.url, ...plan.audio.backupUrls],
+          refreshUrls: () => refreshUrls('a'),
           size: plan.audio.size,
           sink: aPrep.sink,
           signal,
@@ -653,7 +668,7 @@ export class DownloadEngine {
             list = next;
             total = size;
             doneRanges = [];
-            resetSink(sink);
+            await resetSink(sink);
             if (resume) await resume.store.clear(resume.key).catch(() => {});
             const retried = await downloadRanged({
               urls: list,
@@ -675,7 +690,7 @@ export class DownloadEngine {
       }
 
       warn('分片下载失败，回退到顺序下载', err.message);
-      resetSink(sink);
+      await resetSink(sink);
       // 回退顺序下载时不能续传（会重下整个文件），清掉清单避免半份残留
       if (resume) await resume.store.clear(resume.key).catch(() => {});
       return downloadSequential({ urls: list, sink, signal, onProgress });
@@ -955,11 +970,31 @@ export function buildPlan(playInfo, settings, spec) {
   }
 
   const accept = playInfo.acceptQuality || [];
+  // 轨道里**实际存在**的最高清晰度。accept_quality 是 B 站"宣称可接受"的名单，
+  // 里面常有实际并不存在的档位（未登录/非会员时尤其明显），所以不能用它推断
+  // 真实上限——真实上限只能从返回的轨道里看。
+  const trackQualities = (playInfo.videos || [])
+    .map((v) => v.quality ?? v.id)
+    .filter((q) => Number(q) > 0);
+  const maxTrack = trackQualities.length ? Math.max(...trackQualities) : 0;
+
   let quality = spec.quality || settings.defaultQuality || 0;
-  if (!quality) quality = accept[0] || playInfo.videos[0]?.quality;
+  // 自动（0）：用宣称名单的最高档；名单为空时退回**实际存在的最高档**，
+  // 而不是 videos[0]（数组第一个未必是最高，实测可能是 360P）
+  if (!quality) quality = accept[0] || maxTrack || playInfo.videos[0]?.quality || 0;
+
   if (quality && accept.length && !accept.includes(quality)) {
+    // 请求的档位不在名单里：优先降到「不超过它的最高档」；
+    // 若全都比它高（例如请求 16 但名单从 32 起），就升到最接近的一档。
+    // ★ 原来是 `accept[accept.length - 1]`（名单末位 = 最低档），
+    //   会把用户的高清请求**静默变成 360P** —— 这正是"怎么自动下了 360P"的来源。
     const lower = accept.filter((q) => q <= quality).sort((a, b) => b - a)[0];
-    quality = lower || accept[accept.length - 1];
+    const higher = accept.filter((q) => q > quality).sort((a, b) => a - b)[0];
+    const fallback = lower || higher || maxTrack || quality;
+    if (fallback !== quality) {
+      warn('请求的清晰度不可用，已就近调整', `请求 ${quality} → 实际 ${fallback}`);
+    }
+    quality = fallback;
   }
 
   // 「仅音频」模式：不下视频轨，直接把音轨原样落盘（B 站的音轨本身就是

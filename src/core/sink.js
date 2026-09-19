@@ -130,6 +130,31 @@ export class FileHandleSink {
     if (chainError) throw chainError;
   }
 
+  /**
+   * 把文件截断到指定长度。
+   *
+   * 为什么需要：重试 / 换清晰度 / 续传清单失效时要把 sink 归零重下。
+   * 以前只把 `size` 设为 0 **不截断文件**，OPFS 的覆盖写不会缩短文件，
+   * 于是新内容比旧的短时，尾部会残留上一轮的字节 —— 产物是"拼接怪胎"。
+   */
+  async truncate(size = 0) {
+    try {
+      await this._chain;
+    } catch {
+      /* 写入链坏了他也拦不住，继续尽力截断 */
+    }
+    try {
+      if (this.writable) {
+        await this.writable.write({ type: 'truncate', size });
+      } else if (typeof this.handle?.truncate === 'function') {
+        await this.handle.truncate(size);
+      }
+    } catch (err) {
+      warn?.('截断文件失败（可能残留旧数据）', err?.message);
+    }
+    this.size = size;
+  }
+
   async abort() {
     try {
       await this._chain;

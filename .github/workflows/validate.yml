@@ -73,13 +73,13 @@ jobs:
       - name: 用合成 m4s 跑一遍混流器自检
         run: node tools/selftest-synthetic.mjs
 
-      - name: 真实素材混流校验（有 samples/ 时执行）
+      # 原来这里写成 `if [ -d samples ] ... else echo 跳过; fi`，
+      # 而仓库从来没有 samples/ —— 这条**永远走 else**，一直是"跳过的绿"，
+      # 看着像有真实素材校验其实 0 覆盖。现在改成现场合成样本再真跑。
+      - name: 混流产物结构校验（合成样本 -> mux-test，含 SHA-256 逐字节比对）
         run: |
-          if [ -d samples ] && ls samples/*.m4s >/dev/null 2>&1; then
-            node tools/mux-test.mjs
-          else
-            echo "无 samples/ 素材，跳过（该校验在本地有素材时执行）"
-          fi
+          node tools/fixtures/make-samples.mjs samples
+          node tools/mux-test.mjs samples/video.m4s samples/audio.m4s merged.mp4
 
       - name: 独立解析器交叉校验（有产物 mp4 时执行）
         run: |
