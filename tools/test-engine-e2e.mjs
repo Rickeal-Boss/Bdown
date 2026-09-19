@@ -218,6 +218,14 @@ const ok = (name, cond, msg = '') => {
 
 const EXPECT_OUTPUTS = { merge: 1, separate: 2, audio: 1, durl: 1 };
 
+/**
+ * NFO 只在产出**单个完整 mp4** 的模式（merge / durl）下生成。
+ * separate 出的是 .video.mp4 + .audio.m4a（两个都不完整），audio 出的是 .m4a，
+ * 它们的媒体文件名与 NFO 基名对不上，Jellyfin 不会识别 —— 所以必须是 0。
+ * 这两个 0 是**反向用例**：只有它们存在，才能真正锁住"不该产时不产"。
+ */
+const EXPECT_NFO = { merge: 1, separate: 0, audio: 0, durl: 1 };
+
 function makeEngine(mode) {
   return new DownloadEngine({
     api,
@@ -229,6 +237,8 @@ function makeEngine(mode) {
       saveDanmaku: false,
       saveSubtitle: false,
       saveCover: false,
+      // 打开 NFO，用于验证「哪些模式该产、哪些不该产」
+      saveNfo: true,
     },
     onUpdate: () => {},
   });
@@ -250,13 +260,27 @@ async function runCase(mode) {
   // 核心断言：失败原因里不能出现「读取未声明变量」（vStage 那类回归的特征串）
   ok(`${mode}：错误里没有 "is not defined"`, !/is not defined/.test(String(task.error || '')), String(task.error));
   ok(`${mode}：没有残留错误文本`, !task.error, String(task.error));
-  // 产物数量
+  const paths = task.outputs.map((o) => String(o.path || ''));
+  const nfoPaths = paths.filter((p) => p.endsWith('.nfo'));
+  const mediaPaths = paths.filter((p) => !p.endsWith('.nfo'));
+
+  // 产物数量（不含 NFO）
   ok(
-    `${mode}：产物数 = ${EXPECT_OUTPUTS[mode]}`,
-    task.outputs.length === EXPECT_OUTPUTS[mode],
-    `实际 ${task.outputs.length}：${JSON.stringify(task.outputs.map((o) => o.path))}`,
+    `${mode}：媒体产物数 = ${EXPECT_OUTPUTS[mode]}`,
+    mediaPaths.length === EXPECT_OUTPUTS[mode],
+    `实际 ${mediaPaths.length}：${JSON.stringify(paths)}`,
   );
-  ok(`${mode}：确实调用了 chrome.downloads.download`, produced.length === EXPECT_OUTPUTS[mode], `实际 ${produced.length}`);
+  // NFO 门禁：只有 merge / durl 该产；separate / audio 必须是 0
+  ok(
+    `${mode}：NFO 数 = ${EXPECT_NFO[mode]}`,
+    nfoPaths.length === EXPECT_NFO[mode],
+    `实际 ${nfoPaths.length}：${JSON.stringify(paths)}`,
+  );
+  ok(
+    `${mode}：确实调用了 chrome.downloads.download`,
+    produced.length === EXPECT_OUTPUTS[mode] + EXPECT_NFO[mode],
+    `实际 ${produced.length}`,
+  );
   return { task, blobs: [...produced] };
 }
 

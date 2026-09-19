@@ -20,6 +20,38 @@ const BEL = String.fromCharCode(7);
 const ESC = String.fromCharCode(27);
 const DEL = String.fromCharCode(127);
 
+/**
+ * 即使用 Node 内置 DOMParser 也要先做一层轻量校验：
+ * 不同实现对"控制字符"的判定不一致（有些会在解析前静默剥离），
+ * 直接依赖 parsererror 可能放过 NFO 真正会被 Jellyfin 拒掉的那些字符。
+ *
+ * Node 22 目前**没有** DOMParser（实测 `new DOMParser()` 抛 ReferenceError），
+ * 所以这里提供零依赖的等价校验，CI 一定能跑。
+ */
+const CTRL = new RegExp('['
+  + String.fromCharCode(0) + '-' + String.fromCharCode(8)
+  + String.fromCharCode(11) + String.fromCharCode(12)
+  + String.fromCharCode(14) + '-' + String.fromCharCode(31)
+  + String.fromCharCode(127) + ']', 'g');
+
+function xmlProblems(xml) {
+  const problems = [];
+  if (CTRL.test(xml)) problems.push('含 XML 1.0 非法控制字符');
+  // 未转义的裸 &（合法转义是 &amp; &lt; &gt; &quot; &apos; &#...;）
+  const ampOk = /&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);/g;
+  const stripped = xml.replace(ampOk, '');
+  if (/&/.test(stripped)) problems.push('存在未转义的 &');
+  // 极简配平检查
+  for (const tag of ['movie', 'episodedetails', 'tvshow', 'actor']) {
+    const open = (xml.match(new RegExp(`<${tag}[ >]`, 'g')) || []).length;
+    const close = (xml.match(new RegExp(`</${tag}>`, 'g')) || []).length;
+    if (open !== close) problems.push(`${tag} 标签未配平 (${open}/${close})`);
+  }
+  return problems;
+}
+
+const hasDOMParser = typeof DOMParser !== 'undefined';
+
 console.log('\n[1] XML 转义（B 站标题/简介里确实有 & 和引号）');
 {
   ok('& -> &amp;', escapeXml('A & B') === 'A &amp; B', escapeXml('A & B'));
@@ -128,6 +160,14 @@ console.log('\n[8] 缺字段不写空标签（Jellyfin 对空值容忍度差）'
   ok('没有空的 runtime', !nfo.includes('<runtime></runtime>'));
   ok('没有空的 thumb', !nfo.includes('<thumb'));
   ok('没有空的 website', !nfo.includes('<website></website>'));
+  // 注意断言要带闭合尖括号：根元素 <episodedetails> 本身就含子串 "<episode"，
+  // 写成 includes('<episode') 会永远为真（假阳性），必须写 '<episode>'
+  const zero = buildNfo({ title: 'x', duration: 0 });
+  ok('★ runtime 为 0 时整个元素省略（Jellyfin 会当成"片长 0 分钟"）',
+    !zero.includes('<runtime>'), zero);
+  const zeroEp = buildNfo({ kind: 'episode', title: 'x', season: 0, episode: 0 });
+  ok('★ season 为 0 时省略', !zeroEp.includes('<season>'), zeroEp);
+  ok('★ episode 为 0 时省略', !zeroEp.includes('<episode>'), zeroEp);
   ok('仍然有 title', nfo.includes('<title>只有标题</title>'));
   ok('完全空输入也不崩', typeof buildNfo() === 'string' && buildNfo().includes('<movie>'));
   ok('空对象也不崩', buildNfo({}).includes('<movie>'));
@@ -149,6 +189,40 @@ console.log('\n[10] 文件名（与媒体文件同基名，多P 不互相覆盖�
   ok('无扩展名也能处理', nfoFilename('abc') === 'abc.nfo');
   ok('空 -> movie.nfo', nfoFilename('') === 'movie.nfo');
   ok('undefined -> movie.nfo', nfoFilename() === 'movie.nfo');
+}
+
+console.log('\n[11] 产物可被 XML 解析器解析（有 DOMParser 就用，否则用零依赖校验）');
+{
+  const movie = buildNfo({
+    kind: 'movie', title: '测试 & 视频', plot: '简介 <b>粗体</b>',
+    pubdate: 1704153600, duration: 754, cover: 'https://x/c.jpg',
+    owner: { name: '某UP' }, genre: '知识', bvid: 'BV1xx411c7mD', aid: 2,
+  });
+  const episode = buildNfo({
+    kind: 'episode', title: 'E1', showTitle: 'S', season: 1, episode: 1, bvid: 'BV1xx411c7mD',
+  });
+  const tv = buildTvShowNfo({ title: 'S', bvid: 'BV1xx411c7mD' });
+
+  for (const [label, xml] of [['movie', movie], ['episode', episode], ['tvshow', tv]]) {
+    const problems = xmlProblems(xml);
+    ok(`${label}：轻量校验无问题（控制字符 / 裸 & / 标签配平）`,
+      problems.length === 0, problems.join('; '));
+  }
+
+  if (hasDOMParser) {
+    const doc = new DOMParser().parseFromString(movie, 'text/xml');
+    const err = doc.getElementsByTagName('parsererror')[0];
+    ok('DOMParser：movie 解析无错', !err, err && err.textContent);
+    ok('DOMParser：根元素 = movie', doc.documentElement.nodeName === 'movie', doc.documentElement.nodeName);
+    ok('DOMParser：能查到 title', doc.getElementsByTagName('title').length === 1);
+  } else {
+    console.log('  · 本环境无 DOMParser，已用零依赖校验覆盖（CI 一定能跑）');
+  }
+
+  // 控制字符是本项目踩过的坑：修复前会让整个 XML 解析失败
+  const dirty = buildNfo({ title: 't', plot: 'x' + NUL + 'y' });
+  ok('含控制字符的简介不会破坏 XML 合法性',
+    xmlProblems(dirty).length === 0, xmlProblems(dirty).join('; '));
 }
 
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} NFO 模块自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);

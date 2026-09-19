@@ -51,11 +51,22 @@ export function escapeXml(value) {
     .replace(/'/g, '&apos;');
 }
 
-/** 超长文本截断（B 站简介可达数万字符，没必要全塞进 NFO）。 */
+/**
+ * 超长文本截断（B 站简介可达数万字符，没必要全塞进 NFO）。
+ *
+ * 注意**代理对**：若第 max 个字符正好是一个 emoji 的高代理项，直接 slice
+ * 会把它切成半个，写进文件后变成 U+FFFD（`?`）。虽然 U+FFFD 是合法 XML 字符、
+ * 不会导致解析失败，但用户会看到末尾一个乱码字符 —— 切掉它更好。
+ */
 export function truncateText(value, max = 10000) {
   if (value === undefined || value === null) return '';
   const s = String(value);
-  return s.length > max ? `${s.slice(0, max)}…` : s;
+  if (s.length <= max) return s;
+  let cut = s.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  // 高代理项范围 U+D800..U+DBFF：说明这个字符被切成了两半
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return `${cut}…`;
 }
 
 /**
@@ -90,9 +101,27 @@ export function runtimeMinutes(seconds) {
   return Math.round(n / 60);
 }
 
+/**
+ * 判断一个值在 NFO 里是否"等同于空"。
+ *
+ * 注意 **0 也算空**：`runtime` / `season` / `episode` 在拿不到真实值时都是 0，
+ * 而 `<runtime>0</runtime>` 会让 Jellyfin 认为"片长 0 分钟"。
+ * （这里踩过一次：断言只查了空标签 `<runtime></runtime>`，实际产出的是
+ *  `<runtime>0</runtime>` —— 非空，于是断言正好绕开，和 vStage 那次同类。）
+ */
+function isEmpty(value) {
+  if (value === undefined || value === null) return true;
+  if (value === '') return true;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return true;
+    if (value === 0) return true;
+  }
+  return false;
+}
+
 /** 只在值非空时输出一个元素。 */
 function el(tag, value, attrs) {
-  if (value === undefined || value === null || value === '') return '';
+  if (isEmpty(value)) return '';
   const attrStr = attrs
     ? ' ' + Object.entries(attrs).map(([k, v]) => `${k}="${escapeXml(v)}"`).join(' ')
     : '';
