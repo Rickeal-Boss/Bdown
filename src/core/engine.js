@@ -100,6 +100,21 @@ export function isUrlExpiredError(err) {
   return st === 403 || st === 404 || st === 410;
 }
 
+/**
+ * 关闭一个 sink，失败只告警不抛出。
+ *
+ * 对 MemorySink 是 no-op；对 FileHandleSink 是**必须的**——它会 flush 异步写入链
+ * 并关闭 OPFS writable。不关就读回文件内容，会拿到未落盘的数据。
+ */
+async function closeSinkQuietly(sink, label = 'sink') {
+  if (!sink || typeof sink.close !== 'function') return;
+  try {
+    await sink.close();
+  } catch (err) {
+    warn(`关闭${label}失败（继续尝试读取，可能是半截文件）`, err?.message);
+  }
+}
+
 /** 把 sink 恢复到「刚建好」的状态，便于从头重下。 */
 function resetSink(sink) {
   if (sink instanceof MemorySink) {
@@ -522,6 +537,19 @@ export class DownloadEngine {
 
   /** 把两路 DASH 流合并成一路并落盘。 */
   async mergeInto({ task, vSink, aSink, out, destination, filename }) {
+    // ★ 关键：读回输入 sink 之前**必须先关闭它**。
+    //
+    // 大文件（> 256MB，见 sink.js 的 MEMORY_LIMIT）走 OPFS 的 FileHandleSink：
+    // 它的 writeAt() 只把写入排进异步 _chain，**只有 close() 才会 await _chain
+    // 并关闭 writable**。不关闭就直接 handle.getFile()，拿到的可能是还没落盘的
+    // 空文件/半截文件 —— 表现出来就是「不是有效的 MP4：未找到 moov 盒子」。
+    //
+    // 这个 bug 从 v1.0.0 起就存在，但 CI 一直测不出来：test-engine-e2e 用的是
+    // 几 KB 的合成片段，走 MemorySink（数据在内存里，不关也能读到）。
+    // 真实 1080P 长视频必然超过 256MB，于是真机必崩。
+    await closeSinkQuietly(vSink, '视频轨');
+    await closeSinkQuietly(aSink, '音频轨');
+
     const vSource = vSink instanceof MemorySink
       ? memorySource(new Uint8Array(await vSink.blob().arrayBuffer()))
       : blobSource(await vSink.file());

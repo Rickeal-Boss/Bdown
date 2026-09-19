@@ -54,6 +54,11 @@ jobs:
       - name: 播放地址过期刷新自检（403/404 -> refreshUrls 重试）
         run: node tools/test-url-refresh.mjs
 
+      # 大文件（>256MB 走 OPFS）合并前必须 flush 输入 sink，否则读到空文件
+      # 表现为「未找到 moov 盒子」。这是 v1.0.0 起就存在、真机必崩的根 bug。
+      - name: 合并 flush 自检（读回输入 sink 前必须 close）
+        run: node tools/test-merge-flush.mjs
+
       # —— 以下两条是「默认 merge 模式 100% 失败」那次 P0 的回归防护 ——
       # 那次的根因：engine.js 重构（vStage→vPrep）漏改两行，`node --check`
       # 语法完全合法、导入图检查也通过，但 ESM 严格模式下运行时 ReferenceError。

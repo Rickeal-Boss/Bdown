@@ -104,12 +104,30 @@ export class FileHandleSink {
     return this._chain;
   }
 
+  /**
+   * flush 并关闭 OPFS writable。
+   *
+   * 注意：原来写成 `await this._chain; ...`，一旦任何一次 writeAt 失败，
+   * `_chain` 就永久 rejected —— 于是 writable **永远不会被关闭**：
+   *   - OPFS 文件句柄锁死（Chrome 下该文件无法删除/覆盖）
+   *   - 后续 getFile() 读不到已写内容（数据还缓冲在 writable 里）
+   * 现在即便写入链出错，也保证句柄被释放，错误只告警不吞掉语义。
+   */
   async close() {
-    await this._chain;
-    if (this.writable) {
-      await this.writable.close();
-      this.writable = null;
+    let chainError = null;
+    try {
+      await this._chain;
+    } catch (err) {
+      chainError = err;
     }
+    if (this.writable) {
+      try {
+        await this.writable.close();
+      } finally {
+        this.writable = null;
+      }
+    }
+    if (chainError) throw chainError;
   }
 
   async abort() {

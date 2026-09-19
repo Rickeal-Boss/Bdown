@@ -1,3 +1,53 @@
+## [1.4.7] - 2026-09-19
+
+### 🔴 根治「未找到 moov 盒子」—— v1.0.0 起就存在的真机必崩 bug
+
+**先看否定性证据（避免再走弯路）**：我抓了真实 B站 m4s 完整字节，解析 box：
+
+```
+BV16s7b68EEz  Q32 / Q16 全部轨道：
+ftyp(32) → moov(904) → sidx(304) → moof(1904) → mdat(...)
+```
+
+**有 moov**。并且把真实 m4s（视频 5.67MB + 音频 876KB）直接喂进
+`mergeDashStream`，**成功产出 6.5MB 可播文件**（44 片段 / 时长 105.8s）。
+⇒ mp4.js 没坏。（v1.4.4 我断言"DASH 分片不含 moov"是错的，已撤回。）
+
+**真因：合并前没有 flush 输入 sink**
+
+| 环节 | 事实 |
+|---|---|
+| `sink.js` 的 `MEMORY_LIMIT = 256MB` | 超过就走 OPFS 的 `FileHandleSink` |
+| `FileHandleSink.writeAt()` | 只把写入**排进异步 `_chain`**，不落盘 |
+| `FileHandleSink.close()` | 唯一会 `await _chain` 并**关闭 writable** 的地方 |
+| `mergeInto`（本次之前） | 直接 `await vSink.file()`（= `handle.getFile()`），**从未 close** |
+
+⇒ 大文件（真实 1080P 长视频必然 > 256MB）合并时读到的是**还没落盘的空文件**
+⇒ `scanFile` 扫不到任何 box ⇒ 报「未找到 moov 盒子」。
+
+**为什么 CI 全绿**：`test-engine-e2e` 用几 KB 的合成片段 → 走 `MemorySink`
+（数据在内存里，不 close 也能读到）→ 一直"4/4 PASS"。**测试夹具与真实数据形状脱节。**
+
+**注入验证**（证明修复与测试都有效）：移除 close 调用后，测试精确复现用户报错，
+且诊断信息里 `已扫描到的顶层 box：(空)` —— 空文件，与机理完全吻合。
+
+### 修复
+
+- `engine.mergeInto()`：读回 `vSink` / `aSink` 前先 `closeSinkQuietly()` 关闭它们
+- `sink.js` 的 `FileHandleSink.close()`：原来写成 `await this._chain;` —— 一旦任何
+  一次 `writeAt` 失败，`_chain` 永久 rejected，**writable 永远不会被关闭**（OPFS
+  句柄锁死，文件无法删除/覆盖，后续 `getFile()` 也读不到数据）。
+  现在即便写入链出错也保证释放句柄，错误延后抛出不吞
+- 抽出 `tools/fixtures/fmp4.mjs` 共享合成 fMP4 夹具（此前已有 2 份重复拷贝；
+  不能直接 import `selftest-synthetic.mjs`，它模块末尾会自动 `main()` + `process.exit`）
+
+### 测试
+
+- 新增 `tools/test-merge-flush.mjs`（8 项），已接入 CI：
+  用「未 close 就读不到内容」的假 sink **忠实复刻 OPFS 语义**，断言合并成功、
+  两个输入 sink 都被关闭、产物非空且以 `ftyp` 开头、close 失败不中断流程
+- CI 自检 **16 个套件**
+
 ## [1.4.6] - 2026-09-19
 
 ### 新增：播放地址过期（403/404）自动刷新重试
