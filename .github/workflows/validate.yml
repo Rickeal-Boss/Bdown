@@ -37,6 +37,9 @@ jobs:
       - name: 清晰度挑选自检（DASH 下 qn 无效，必须客户端挑）
         run: node tools/test-quality-pick.mjs
 
+      - name: 章节模块自检（view_points 解析与 txt/vtt 导出）
+        run: node tools/test-chapters.mjs
+
       # —— 以下两条是「默认 merge 模式 100% 失败」那次 P0 的回归防护 ——
       # 那次的根因：engine.js 重构（vStage→vPrep）漏改两行，`node --check`
       # 语法完全合法、导入图检查也通过，但 ESM 严格模式下运行时 ReferenceError。

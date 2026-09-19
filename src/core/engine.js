@@ -22,6 +22,7 @@ import { addRange } from './resume.js';
 import { ResumeStore, resumeKey } from './resume-store.js';
 import { parseDanmakuXml, danmakuToAss, danmakuToSrt, danmakuToText, filterDanmaku } from './danmaku.js';
 import { parseSubtitleJson, subtitleToSrt, subtitleToAss, subtitleToText, pickSubtitle } from './subtitle.js';
+import { parseViewPoints, chaptersToTxt, chaptersToVtt } from './chapters.js';
 import { buildFilename, buildVars } from './settings.js';
 import { qualityShort } from './quality.js';
 import { sanitizeFilename, log, warn } from './util.js';
@@ -657,9 +658,19 @@ export class DownloadEngine {
       }
     }
 
+    // 字幕与章节的数据都在 /x/player/wbi/v2 里，共用一次请求，避免重复调用。
+    let playerInfo = null;
+    if (settings.saveSubtitle || settings.saveChapters) {
+      try {
+        playerInfo = await api.playerV2({ bvid: spec.bvid, aid: spec.aid, cid: spec.cid });
+      } catch (err) {
+        warn('播放器信息获取失败（字幕/章节都依赖它）', err);
+      }
+    }
+
     if (settings.saveSubtitle) {
       try {
-        const info = await api.playerV2({ bvid: spec.bvid, aid: spec.aid, cid: spec.cid });
+        const info = playerInfo;
         const subs = info?.subtitle?.subtitles || [];
         const target = pickSubtitle(subs, settings.subtitleLan);
         if (target?.subtitle_url) {
@@ -686,6 +697,28 @@ export class DownloadEngine {
         }
       } catch (err) {
         warn('字幕获取失败', err);
+      }
+    }
+
+    // 章节：数据源是 /x/player/wbi/v2 的 view_points。
+    // 上面取字幕时已经调过这个接口，这里若再调一次就是纯浪费；
+    // 但 saveSubtitle 关闭时我们没调过，所以按需各取一次。
+    if (settings.saveChapters) {
+      try {
+        const info = playerInfo;
+        const chapters = parseViewPoints(info?.view_points, {
+          duration: spec.duration || plan?.duration,
+        });
+        if (chapters.length) {
+          if (settings.chapterFormat === 'vtt') {
+            await put(`${task.filename}.chapters.vtt`, chaptersToVtt(chapters), 'text/vtt');
+          } else {
+            await put(`${task.filename}.chapters.txt`, chaptersToTxt(chapters), 'text/plain');
+          }
+          log('章节已保存', chapters.length);
+        }
+      } catch (err) {
+        warn('章节获取失败', err);
       }
     }
 

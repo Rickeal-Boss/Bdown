@@ -109,6 +109,7 @@
       <div class="grid">
         <label class="bd-switch field-inline"><input type="checkbox" data-key="saveDanmaku" /><span>保存弹幕</span></label>
         <label class="bd-switch field-inline"><input type="checkbox" data-key="saveSubtitle" /><span>保存字幕</span></label>
+        <label class="bd-switch field-inline"><input type="checkbox" data-key="saveChapters" /><span>保存章节<small>（与字幕共用同一次请求，几乎零成本）</small></span></label>
         <label class="bd-switch field-inline"><input type="checkbox" data-key="saveCover" /><span>保存封面</span></label>
         <label class="bd-field">
           <span class="bd-label">弹幕格式</span>
@@ -126,6 +127,12 @@
             <option value="ass">ASS</option>
             <option value="txt">纯文本</option>
           </select>
+          <label class="bd-field"><span>章节格式</span>
+            <select class="bd-select" data-key="chapterFormat">
+              <option value="txt">txt（YouTube 风格 0:00 标题）</option>
+              <option value="vtt">vtt（WebVTT 章节轨，播放器可识别）</option>
+            </select>
+          </label>
         </label>
         <label class="bd-field">
           <span class="bd-label">字幕语言偏好</span>

@@ -1,3 +1,37 @@
+## [1.4.3] - 2026-09-19
+
+### 新增：章节（chapters）保存
+
+BBDown 有「自动合并音频+视频流+字幕流+**章节信息**」，我们没有。调研后发现
+章节数据其实是**白送**的：
+
+- 数据源：`/x/player/wbi/v2` → `data.view_points[]`
+- **我们本来就在调这个接口取字幕**，所以取章节是零额外请求
+- 实测（无章节的视频）：`view_points: []`；有章节时元素形如 `{ from, to, content }`
+
+**实现**：
+- 新增 `src/core/chapters.js`（纯函数）：
+  - `parseViewPoints()` —— 兼容 `{from,to,content}` / `{start,end,title}` / `{time,text}` 三种写法，
+    自动排序、补全 `end`（用下一条的 start，最后一条用总时长）、脏数据丢弃不崩
+  - `chaptersToTxt()` —— YouTube 风格 `0:00 标题`
+  - `chaptersToVtt()` —— WebVTT 章节轨（PotPlayer / mpv / VLC 可识别）
+- `fetchExtras` 里**字幕与章节共用一次 `playerV2` 请求**（原本各调一次会浪费）
+- 选项页新增「保存章节」开关 + 章节格式（txt / vtt）下拉
+- 默认**关闭**（与字幕、封面一致，不产生意外文件）
+
+### 测试
+
+- 新增 `tools/test-chapters.mjs`（37 项），已接入 CI：
+  输入容错（10 种脏输入）、三种字段名兼容、排序与 end 补全、时间戳格式、txt/vtt 导出、空输入
+- CI 自检 **12 个套件**：validate 21 + core 57 + api 21 + resume 63 + resume-store 26 +
+  routing 9 + quality-pick 14 + chapters 37 + lint-noundef + e2e 29 + synthetic + package
+
+### 已知局限
+
+- `view_points` 的真实字段结构**未在真机确认**（B 站未公开文档）。我们兼容了社区常见的三种写法，
+  若实际字段不同，`parseViewPoints` 会静默返回空数组 → 不生成文件，不会崩。
+  需要用一个**确实有章节**的视频验证一次。
+
 ## [1.4.2] - 2026-09-19
 
 ### 🔴 根治「非会员只下到 360P」—— 前三次修复都没触达病根

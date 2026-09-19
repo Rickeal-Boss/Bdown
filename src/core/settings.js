@@ -33,6 +33,10 @@ export const DEFAULT_SETTINGS = {
   saveDanmaku: true,
   danmakuFormat: 'ass', // ass | xml | srt | txt
   saveSubtitle: false,
+  /** 章节（view_points）—— 与字幕共用同一次请求，开启几乎零成本 */
+  saveChapters: false,
+  /** 章节格式：txt（YouTube 风格）或 vtt（WebVTT 章节轨） */
+  chapterFormat: 'txt',
   subtitleFormat: 'srt', // srt | ass | txt
   subtitleLan: 'zh-CN',
 
