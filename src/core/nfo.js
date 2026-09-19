@@ -52,7 +52,13 @@ export function escapeXml(value) {
 }
 
 /**
- * 超长文本截断（B 站简介可达数万字符，没必要全塞进 NFO）。
+ * 超长文本截断。
+ *
+ * **max 是"原始字符数"上限，不是转义后的字节数**：这里刻意保持
+ * 「先截断、后转义」的顺序。若改成先转义再截断，会在实体中间切断
+ * （比如 `&amp;` 被切成 `&am`），产出**裸 `&`** —— 那是会让整个 XML
+ * 解析失败的 P0 级问题。代价是转义后体积可能膨胀（最坏约 5 倍），
+ * 用一个罕见的大文件换一个潜在 P0，值得。
  *
  * 注意**代理对**：若第 max 个字符正好是一个 emoji 的高代理项，直接 slice
  * 会把它切成半个，写进文件后变成 U+FFFD（`?`）。虽然 U+FFFD 是合法 XML 字符、
@@ -119,12 +125,20 @@ function isEmpty(value) {
   return false;
 }
 
+/** 把换行折叠成空格。用于 `<title>`：标题换行会让 Jellyfin 显示错乱。 */
+function collapseNewlines(value) {
+  if (typeof value !== 'string') return value;
+  return value.replace(/[\r\n]+/g, ' ').trim();
+}
+
 /** 只在值非空时输出一个元素。 */
 function el(tag, value, attrs) {
   if (isEmpty(value)) return '';
   const attrStr = attrs
     ? ' ' + Object.entries(attrs).map(([k, v]) => `${k}="${escapeXml(v)}"`).join(' ')
     : '';
+  // 顺序：先截断（在 buildNfo 里做）→ 这里再转义。
+  // 反过来（先转义再截断）会在实体中间切断，产出裸 & —— P0。
   return `  <${tag}${attrStr}>${escapeXml(value)}</${tag}>\n`;
 }
 
@@ -159,10 +173,21 @@ export function buildNfo(meta = {}) {
   const aid = meta.aid ? String(meta.aid) : '';
   const pageUrl = bvid ? `https://www.bilibili.com/video/${bvid}` : '';
 
+  // `<title>` 是 Jellyfin / Kodi 的**必需字段**：没有它条目无法入库，
+  // 整个 NFO 等于白写，而且失败是**静默**的（用户完全不知道）。
+  // 所以必须有回退链兜底。
+  // 回退用 bvid 而不是 task.filename —— filename 带 `P{n}_{part}` 与清晰度后缀，
+  // 会污染标题。
+  const title = collapseNewlines(
+    meta.title || meta.bvid || (meta.aid ? `av${meta.aid}` : '') || '未知标题',
+  );
+
   let body = '';
-  body += el('title', meta.title);
+  // 标题里的换行折叠成空格（Jellyfin 会原样显示，换行会让列表错乱）；
+  // 而 `plot` 保留换行 —— 那是正常的段落分隔。
+  body += el('title', title);
   if (kind === 'episode') {
-    body += el('showtitle', meta.showTitle || meta.title);
+    body += el('showtitle', collapseNewlines(meta.showTitle) || title);
     body += el('season', meta.season);
     body += el('episode', meta.episode);
   }
@@ -204,7 +229,10 @@ export function buildNfo(meta = {}) {
  */
 export function buildTvShowNfo(meta = {}) {
   let body = '';
-  body += el('title', meta.title);
+  // 与 buildNfo 同样的 `<title>` 回退链 —— 没有标题的 tvshow.nfo 同样是白写
+  body += el('title', collapseNewlines(
+    meta.title || meta.bvid || (meta.aid ? `av${meta.aid}` : '') || '未知标题',
+  ));
   body += el('plot', truncateText(meta.plot));
   body += el('year', isoDate(meta.pubdate).slice(0, 4));
   body += el('premiered', isoDate(meta.pubdate));
