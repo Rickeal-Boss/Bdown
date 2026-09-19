@@ -18,7 +18,7 @@
       ]
     },
     "condition": {
-      "regexFilter": "^https?://([^/]*\\.)?(bilivideo\\.com|bilivideo\\.cn|akamaized\\.net|hdslb\\.com|biliapi\\.net)(:\\d+)?/",
+      "regexFilter": "^https?://([^/?#]*\\.)?(bilivideo\\.com|bilivideo\\.cn|akamaized\\.net|hdslb\\.com|biliapi\\.net)(:\\d+)?/",
       "resourceTypes": [
         "xmlhttprequest",
         "media",
@@ -42,7 +42,7 @@
       ]
     },
     "condition": {
-      "regexFilter": "^https?://([^/]*\\.)?(bilivideo\\.com|bilivideo\\.cn|akamaized\\.net|hdslb\\.com|biliapi\\.net)(:\\d+)?/",
+      "regexFilter": "^https?://([^/?#]*\\.)?(bilivideo\\.com|bilivideo\\.cn|akamaized\\.net|hdslb\\.com|biliapi\\.net)(:\\d+)?/",
       "resourceTypes": [
         "image"
       ]
@@ -82,7 +82,7 @@
       ]
     },
     "condition": {
-      "regexFilter": "^https?://([^/]*\\.)?(bilibili\\.com|bilibili\\.tv|b23\\.tv)(:\\d+)?/",
+      "regexFilter": "^https?://([^/?#]*\\.)?(bilibili\\.com|bilibili\\.tv|b23\\.tv)(:\\d+)?/",
       "resourceTypes": [
         "xmlhttprequest",
         "other"
