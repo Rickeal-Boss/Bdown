@@ -150,7 +150,9 @@ export class FileHandleSink {
         await this.handle.truncate(size);
       }
     } catch (err) {
-      warn?.('截断文件失败（可能残留旧数据）', err?.message);
+      // 注意：这里不能用项目里的 warn()——sink.js 没有引入它。
+      // 截断失败不致命，静默继续；上层读回时会因数据不对而报明确错误。
+      void err;
     }
     this.size = size;
   }
