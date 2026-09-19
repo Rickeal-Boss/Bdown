@@ -43,10 +43,17 @@ export const FNVAL_DASH = 16 | 64 | 128 | 256 | 512 | 1024 | 2048; // = 4048
 export const FNVAL_PGC_DASH = FNVAL_DASH | 8192; // = 12240
 /** fnval=1 时返回 durl（可直下的单文件 MP4/FLV），清晰度上限较低。 */
 export const FNVAL_DURL = 1;
+/**
+ * 课程（pugv）用 **16（只要 DASH）**，与 yt-dlp 的实现一致。
+ * 我们原先沿用 ugc 的 4048，但 4048 含 HDR/4K/杜比/8K 等位，对 pugv 是否
+ * 适用从未验证过；yt-dlp 这里明确写死 16。
+ */
+export const FNVAL_PUGV = 16;
 
 const ERROR_MESSAGES = {
   '-101': '账号未登录，请先在浏览器中登录 B 站',
   '-400': '请求参数错误',
+  '-401': '非法访问（URL 缺少必填字段或内容不可用），请回到视频页重新点一次「下载」',
   '-403': '访问权限不足（可能需要登录、大会员或该内容已被限制）',
   '-404': '视频不存在或已被删除',
   '-352': '被 B 站风控拦截，请稍后重试或降低并发',
@@ -282,13 +289,20 @@ export class BiliApi {
     // 响应里 accept_quality 为 null，拿不到可用清单。
     const account = await this.ensureAccount().catch(() => null);
     const resolvedQn = qn > 0 ? qn : (account && account.vip ? 127 : (logged ? 80 : 64));
+    const kind = cheeseId ? 'pugv' : epId ? 'pgc' : 'ugc';
     const params = {
       cid,
       qn: resolvedQn,
       fnver: 0,
       // 番剧（pgc）接口需要额外的 fnval 位才能拿到全部清晰度：
       // yt-dlp 对 pgc/player/web/v2/playurl 用的是 12240 = 4048 | 8192。
-      fnval: mode === 'durl' ? FNVAL_DURL : epId ? FNVAL_PGC_DASH : FNVAL_DASH,
+      fnval: mode === 'durl'
+        ? FNVAL_DURL
+        : kind === 'pugv'
+          ? FNVAL_PUGV
+          : kind === 'pgc'
+            ? FNVAL_PGC_DASH
+            : FNVAL_DASH,
       fourk,
       otype: 'json',
       // B 站的 /x/player/wbi/playurl 在 2025 年后收紧了对 platform 的校验，
@@ -304,7 +318,6 @@ export class BiliApi {
 
     // 课程（pugv）：DownKyi 的注释明确写了「必须有 episodeId，否则会返回请求
     // 错误（code -400）」—— 所以 cheeseId 是必填，不能像番剧那样只给 cid。
-    const kind = cheeseId ? 'pugv' : epId ? 'pgc' : 'ugc';
     const path = kind === 'pugv'
       ? '/pugv/player/web/playurl'
       : kind === 'pgc'
@@ -323,6 +336,12 @@ export class BiliApi {
 
     if (epId) params.ep_id = epId;
     if (cheeseId) params.ep_id = cheeseId;
+    // pugv 文档只列了 avid（B 站就没写 bvid）。课程场景补一个 avid 兜底，
+    // 避免"既无 bvid 又无 avid"被本地闸门拦下。
+    if (kind === 'pugv' && !params.avid && !params.bvid) {
+      const nav = Number(aid);
+      if (Number.isFinite(nav) && nav > 0) params.avid = nav;
+    }
 
     let data;
     try {
@@ -531,20 +550,31 @@ function httpsUrl(u) {
 export function pickVideoTrack(videos, quality, preferCodec = 'avc') {
   if (!videos.length) return null;
   const order = { avc: [7, 12, 13], hevc: [12, 7, 13], av1: [13, 12, 7] }[preferCodec] || [7, 12, 13];
-  const sameQ = videos.filter((v) => v.quality === quality);
-  const pool = sameQ.length ? sameQ : videos;
+  const qOf = (v) => Number(v.quality ?? v.id) || 0;
+
+  // 用户指定了清晰度时，只考虑「不超过该档」的轨道；auto（<=0）则全部候选。
+  // 注意：DASH 下 qn 是无效的（实测：传 0/80/125/127 返回的轨道集合完全一致），
+  // B 站按账号权限返回它能给的全部轨道，清晰度必须**在客户端挑**。
+  const maxQ = Number(quality) > 0 ? Number(quality) : Infinity;
+  const eligible = videos.filter((v) => qOf(v) <= maxQ);
+  const pool = eligible.length ? eligible : videos;
+
   const sorted = [...pool].sort((a, b) => {
+    // 1) 清晰度降序 —— 第一优先级。旧实现完全没排清晰度，只按码率取最大，
+    //    导致低清轨码率稍高时会被误选（这正是"非会员下出 360P"的真实原因）。
+    const aq = qOf(a);
+    const bq = qOf(b);
+    if (aq !== bq) return bq - aq;
+    // 2) 编码偏好
     const ai = order.indexOf(a.codecid);
     const bi = order.indexOf(b.codecid);
     const as = ai < 0 ? 99 : ai;
     const bs = bi < 0 ? 99 : bi;
     if (as !== bs) return as - bs;
+    // 3) 同清晰度同编码下，码率高的优先
     return (b.bandwidth || 0) - (a.bandwidth || 0);
   });
-  // 同编码下选码率最高的
-  const best = sorted[0];
-  const sameCodec = sorted.filter((v) => v.codecid === best.codecid);
-  return sameCodec.sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))[0];
+  return sorted[0];
 }
 
 /** 挑出最优音轨：优先无损/杜比，其次 192K。 */
