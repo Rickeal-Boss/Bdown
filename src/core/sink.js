@@ -1,3 +1,5 @@
+import { warn } from './util.js';
+
 /**
  * 数据落盘目标（Sink）。
  *

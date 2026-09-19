@@ -1,3 +1,52 @@
+## [1.4.9] - 2026-09-19
+
+### 🔴 修 CI 红：`sink.js` 里的 `truncate()` 用了未定义的 `warn`
+
+上一版给 `FileHandleSink` 加 `truncate()` 时写了 `warn?.('截断文件失败...')`，
+但 **sink.js 并没有引入 `warn`**。`?.` 让它在运行时静默不崩，却被
+`lint-noundef` 抓了出来。
+
+**这是我这轮第二次"没看到输出就说全绿"**：本地我只跑了 14 个 node 套件，
+lint 那行的输出是空的我没核对，就宣布"全绿"。CI 第一步就红，后续步骤被
+GitHub 级联跳过，看起来像大面积失败，其实只有 1 处。
+
+已修：sink.js 补 `import { warn } from './util.js'`。
+
+> 值得一提：`lint-noundef.mjs` 这是**第一次在生产代码**（而非注入的演示 bug）
+> 上抓到未定义标识符，说明这个工具真的有用。
+
+### 🟠 测试夹具的 `trun.data_offset` 算错 20 字节（独立解析器抓到）
+
+把上一版新加的「混流产物结构校验」接进 CI 后，下一步的**独立解析器**
+`tools/mp4check.py`（纯 Python，完全不引用项目代码）报：
+
+```
+✗ 所有 trun.data_offset 落在紧随其后的 mdat 内（检查 5 个 trun，越界 5）
+  实际 108 / 正确 128，偏差 -20
+```
+
+一开始我怀疑是 `mp4.js` 的合并算错了。逐字节比对源样本与产物后确认：
+**源文件自己的 data_offset 就是 108**，`mp4.js` 只是忠实复制（它不该重写——
+真实 B 站文件的偏移本来就是对的，重写反而会改坏）。
+
+真因在**测试夹具** `buildFmp4`：手算 moof 大小时漏了 `first_sample_flags`(4B)
+与 `traf`/`moof` 各自的 8 字节头，固定少 20。
+
+修复：**先组装一次量出真实大小，再回填**（`buildMoof(0).length + 8`），
+不再手算。修完独立解析器全绿（越界 0）。
+
+顺带消除三份分叉的 `buildFmp4` 拷贝 —— `selftest-synthetic.mjs` 与
+`test-engine-e2e.mjs` 改为共用 `tools/fixtures/fmp4.mjs`（共移除 229 行重复）。
+
+### 其他
+
+- `tools/fixtures/make-samples.mjs`：CI 现场生成混流样本（已 gitignore）
+- CI 里「真实素材混流校验」从"永远跳过"改为真执行
+
+### CI 自检
+
+**17 个套件**（新增混流产物结构校验 + 独立解析器交叉校验为真实执行）
+
 ## [1.4.8] - 2026-09-19
 
 ### 🔴 修复「自动下载了 360P」的三条路径（继 v1.4.7 修 merge 崩溃之后）

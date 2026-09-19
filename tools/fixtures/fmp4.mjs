@@ -126,29 +126,31 @@ export function buildFmp4({ handler, sampleEntry, timescale, fragments, samplesP
   const chunks = [ftyp, moov];
   for (let i = 0; i < fragments; i++) {
     const sampleCount = samplesPerFragment;
-    // trun: header(8) + ver/flags(4) + count(4) + data_offset(4) + (size(4) + cto(4)) * n
-    const trunSize = 20 + 8 * sampleCount;
-    const trafSize = 16 + 16 + trunSize;
-    const moofSize = 16 + trafSize;
-    const dataOffset = moofSize + 8; // 跳过 mdat 的 8 字节头部
 
-    const mfhd = box('mfhd', Buffer.from([0, 0, 0, 0]), u32(i + 1));
-    const tfhd = box('tfhd', Buffer.from([0x00, 0x02, 0x00, 0x00]), u32(1));
-    const tfdt = box('tfdt', Buffer.from([0, 0, 0, 0]), u32(i * sampleCount * sampleDuration));
-
-    const trunParts = [
-      Buffer.from([0, 0, 0x0a, 0x05]), // data_offset | first_sample_flags | sample_size | cto
-      u32(sampleCount),
-      u32(dataOffset),
-      u32(0x02000000), // first_sample_flags
-    ];
-    for (let s = 0; s < sampleCount; s++) {
-      trunParts.push(u32(sampleSize));
-      trunParts.push(u32(0));
-    }
-    const trun = box('trun', ...trunParts);
-    const traf = box('traf', tfhd, tfdt, trun);
-    const moof = box('moof', mfhd, traf);
+    // ★ dataOffset 不能靠"手算 moof 大小"得出 —— 手算很容易漏：
+    //   trun 还有 first_sample_flags(4)，traf / moof 各有 8 字节头。
+    // 以前手算固定少 20 字节，产出的样本 `trun.data_offset` 全部偏小，
+    // 被独立解析器 tools/mp4check.py 抓到（播放器会因此找不到样本数据）。
+    // 正确做法：**先组装一次量出真实大小**，再回填。
+    const buildMoof = (dataOffset) => {
+      const mfhd = box('mfhd', Buffer.from([0, 0, 0, 0]), u32(i + 1));
+      const tfhd = box('tfhd', Buffer.from([0x00, 0x02, 0x00, 0x00]), u32(1));
+      const tfdt = box('tfdt', Buffer.from([0, 0, 0, 0]), u32(i * sampleCount * sampleDuration));
+      const trunParts = [
+        Buffer.from([0, 0, 0x0a, 0x05]), // data_offset | first_sample_flags | sample_size | cto
+        u32(sampleCount),
+        u32(dataOffset),
+        u32(0x02000000), // first_sample_flags
+      ];
+      for (let s = 0; s < sampleCount; s++) {
+        trunParts.push(u32(sampleSize));
+        trunParts.push(u32(0));
+      }
+      return box('moof', mfhd, box('traf', tfhd, tfdt, box('trun', ...trunParts)));
+    };
+    // 用占位值 0 组装一次量大小（data_offset 是定长字段，不影响总长）
+    const dataOffset = buildMoof(0).length + 8; // +8 跳过紧随其后 mdat 的头部
+    const moof = buildMoof(dataOffset);
 
     const mdat = box('mdat', Buffer.alloc(sampleCount * sampleSize, fill + i));
     chunks.push(moof, mdat);

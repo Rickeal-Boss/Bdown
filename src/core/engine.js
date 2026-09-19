@@ -218,6 +218,20 @@ export class DownloadEngine {
        * 而不是拿同一个过期地址重试。
        * @param {'v'|'a'} side
        */
+      /**
+       * 用旧地址里的 query 补到新地址上。
+       *
+       * B 站的 m4s 地址形如 `...m4s?e=ig8euxZM2r...&deadline=...&trid=...`。
+       * 实测**去掉 ? 后 4 个域名全部失败**（QA 独立复现），说明这些签参是必需的。
+       * 而 playurl 返回的地址有时不带 query，所以刷新后要用旧地址的 query 兜底。
+       */
+      const withQuery = (url, fallbackUrl) => {
+        if (!url) return '';
+        if (String(url).includes('?')) return url;
+        const i = String(fallbackUrl || '').indexOf('?');
+        return i > 0 ? String(url) + String(fallbackUrl).slice(i) : url;
+      };
+
       const refreshUrls = async (side) => {
         const fresh = await api.playurl({
           bvid: spec.bvid,
@@ -233,11 +247,15 @@ export class DownloadEngine {
         if (side === 'd') {
           const item = (fp.durl || [])[0];
           if (!item) return [];
-          return [item.url, ...(item.backupUrls || [])].filter(Boolean);
+          const base = (plan.durl || [])[0];
+          return [withQuery(item.url, base?.url)].filter(Boolean);
         }
         const track = side === 'a' ? fp.audio : fp.video;
         if (!track) return [];
-        return [track.url, ...(track.backupUrls || [])].filter(Boolean);
+        const base = side === 'a' ? plan.audio : plan.video;
+        // 只回主源即可：backupUrls 在 buildPlan 里未必带签参，
+        // 而这里的关键是「URL 过期 -> 换一批**完整可用**的地址」
+        return [withQuery(track.url, base?.url)].filter(Boolean);
       };
       task.quality = plan.quality;
       task.codec = plan.codec;

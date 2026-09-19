@@ -324,7 +324,7 @@ function updateSummary() {
   const qualityOpt = buildQualityOptions().find((o) => o.quality === selectedQuality);
   const totalSize = (qualityOpt?.size || 0) * specs.length;
   $('summary').innerHTML = `
-    共 <b>${specs.length}</b> 个任务 · 清晰度 <b>${qualityOpt?.label || '—'}</b>
+    共 <b>${specs.length}</b> 个任务 · 清晰度 <b>${escapeHtml(qualityOpt?.label || '—')}</b>
     · 预计 <b>${formatBytes(totalSize)}</b>
     ${settings.downloadMode === 'durl' ? '<br><span class="bd-hint">单文件直下模式的实际清晰度以接口返回为准</span>' : ''}`;
   $('btnStart').disabled = specs.length === 0;
