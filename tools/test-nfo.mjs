@@ -285,16 +285,28 @@ console.log('\n[12] 空白字符串不能绕过回退链 / 判空（qa-lead 复�
 console.log('\n[13] 校验器本身必须无状态（防 lastIndex 陷阱）');
 {
   const clean = buildNfo({ title: 'a', plot: 'b', bvid: 'BV1xx411c7mD' });
-  const dirty = buildNfo({ title: 'a', plot: 'x' + NUL + 'y', bvid: 'BV1xx411c7mD' });
-  // 交替调用：若 CTRL 正则带 g 标志，这里会时灵时不灵
+  // 注意：buildNfo 会**剥离**控制字符，所以它的产物本来就该是干净的。
+  // （我第一版把这里写成"脏文档必须检出 > 0 问题" —— 那是错的：断言指向了
+  //   错误的对象。正确的断言是"产物干净" + "校验器本身确实能检出"。）
+  const dirtyOut = buildNfo({ title: 'a', plot: 'x' + NUL + 'y', bvid: 'BV1xx411c7mD' });
+  ok('含控制字符的简介，产物本身是干净的（剥离生效）',
+    xmlProblems(dirtyOut).length === 0, String(xmlProblems(dirtyOut).length));
+  ok('产物里确实不含控制字符', !dirtyOut.includes(NUL));
+
+  // 校验器本身必须能检出 —— 否则它就是一个永远返回 0 的摆设
+  const dirtyXml = '<movie><plot>x' + NUL + 'y</plot></movie>';
+  ok('校验器能检出控制字符（不是摆设）', xmlProblems(dirtyXml).length > 0,
+    String(xmlProblems(dirtyXml).length));
+
+  // 无状态：交替调用结果必须一致（带 g 标志的正则配 .test() 会时灵时不灵）
   const r1 = xmlProblems(clean).length;
-  const r2 = xmlProblems(dirty).length;
+  const r2 = xmlProblems(dirtyXml).length;
   const r3 = xmlProblems(clean).length;
-  const r4 = xmlProblems(dirty).length;
+  const r4 = xmlProblems(dirtyXml).length;
   ok('干净文档连续两次结果一致', r1 === r3, `${r1} vs ${r3}`);
   ok('脏文档连续两次结果一致', r2 === r4, `${r2} vs ${r4}`);
   ok('干净文档 = 0 问题', r1 === 0, String(r1));
-  ok('脏文档 = 有问题（控制字符被检出）', r2 > 0, String(r2));
+  ok('脏文档 = 有问题', r2 > 0, String(r2));
 }
 
 console.log('\n[14] 标签白名单（避免"测试抄实现"的循环论证）');
