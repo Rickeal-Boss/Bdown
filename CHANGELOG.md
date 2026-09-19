@@ -1,3 +1,38 @@
+## [1.4.12] - 2026-09-19
+
+### 按产品评审意见修正 v1.4.11 的 NFO 实现
+
+评审员（gstack-product-reviewer）给了 7 条修订，其中 **1 条是 P0**：
+
+| 评审意见 | v1.4.11 的问题 | 处置 |
+|---|---|---|
+| **P0：`desc` 必须剥离控制字符** | 只做了 5 实体转义。控制字符**不是合法 XML 1.0 字符**，会让整个 NFO 解析失败，而 Jellyfin 只会**静默丢弃**——用户完全不知道为什么没刮削到 | 剥离 U+0000-0008 / 000B / 000C / 000E-001F / 007F（保留换行与制表符，它们是合法 XML 字符） |
+| `pubdate` 按 **Asia/Shanghai** 格式化 | 用的是运行环境本地时区。CI 跑在 UTC 上，**凌晨发布的视频会差一天** | 改用 `Intl.DateTimeFormat` 指定 `timeZone: 'Asia/Shanghai'` |
+| 超长简介截断 | 无，数万字符全塞进 NFO | 截断到 10000 字（带省略号） |
+| 形态按**视频类型**定 | 按 `pages.length > 1` 判 episode，多P 普通视频被误判成剧集 | 只有番剧 / 课程（`epId`/`seasonId`/`cheeseId`）才是 episode，普通视频（含多P）一律 movie |
+| `separate` / `audio` 模式不产 NFO | 所有模式都产。separate 出的是 `.video.mp4` + `.audio.m4a`，两个都不完整 | 只在产出**单个完整 mp4** 的 `merge` / `durl` 模式下生成 |
+| 补 `source` / `website` / `uniqueid type="avid"` | 缺失 | 已补（`website` 回链原视频，便于 Jellyfin 识别来源） |
+| **不写 `streamdetails`** | 未涉及 | 明确不写——会覆盖 Jellyfin 自己的媒体探测结果 |
+
+### 顺带：互动视频（stein gate）识别
+
+采纳评审员「低成本替代方案」：从 `view` 接口的 `rights.is_stein_gate`（**不额外请求**）
+识别互动视频，命中时明确 warn「当前只下载主线（默认分支），分支剧情未包含」，
+而不是让用户以为是下载失败。分支展开（`/x/stein/edgeinfo_v2`）仍未实现。
+
+### 已知保留的取舍
+
+- `tvshow.nfo` **未接线**：Jellyfin 要求它位于剧集专属目录，而我们输出到平铺目录，
+  写一个固定 `tvshow.nfo` 会污染同目录其他内容。函数保留，待将来「按番剧建子目录」
+- `<genre>` 用 B 站分区名（非标准影视分类）—— B 站内容没有标准分类
+- UP 主放 `<actor>` —— Kodi 没有"创作者"对应元素，务实借用
+
+### 测试
+
+- `test-nfo` 49 → **63** 项：新增控制字符剥离（5 项）、超长截断（6 项）、
+  北京时区跨日（1 项，UTC 会差一天）、`source`/`website`/`uniqueid avid`（3 项）
+- CI 自检 **19 个套件**全绿
+
 ## [1.4.11] - 2026-09-19
 
 ### 新增：NFO 元数据（Jellyfin / Kodi / Emby 媒体库归档）

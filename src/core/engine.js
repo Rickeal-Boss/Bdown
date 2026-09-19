@@ -258,6 +258,9 @@ export class DownloadEngine {
         // 而这里的关键是「URL 过期 -> 换一批**完整可用**的地址」
         return [withQuery(track.url, base?.url)].filter(Boolean);
       };
+      if (spec.info?.steinGate) {
+        warn('这是一个互动视频：当前只下载主线（默认分支），分支剧情未包含');
+      }
       task.quality = plan.quality;
       task.codec = plan.codec;
       task.totalBytes = plan.totalBytes;
@@ -869,19 +872,27 @@ export class DownloadEngine {
       }
     }
 
-    // NFO（Jellyfin / Kodi 归档）：与媒体文件同基名，避免多P互相覆盖
-    if (settings.saveNfo) {
+    // NFO（Jellyfin / Kodi 归档）：与媒体文件同基名，多P 天然不互相覆盖。
+    //
+    // 只在**产出单个 mp4** 的模式（merge / durl）下生成：
+    //   - separate 出的是 .video.mp4 + .audio.m4a，两个文件都残缺，不该有 NFO
+    //   - audio 出的是 .m4a，NFO 基名对不上，Jellyfin 不会识别
+    const nfoMode = settings.downloadMode === 'merge' || settings.downloadMode === 'durl';
+    if (settings.saveNfo && nfoMode) {
       try {
         const info = spec.info || {};
         const page = info.pages?.[spec.pageIndex || 0];
-        const isEpisode = !!(spec.epId || spec.seasonId || spec.cheeseId)
-          || (info.pages?.length || 0) > 1;
+        // 形态按**视频类型**定，不按 P 数：
+        //   普通视频（哪怕是多P）是 movie，只有番剧 / 课程才是 episode
+        const isBangumi = !!(spec.epId || spec.seasonId || spec.cheeseId);
         const nfo = buildNfo({
-          kind: isEpisode ? 'episode' : 'movie',
-          title: isEpisode && page?.part ? `${info.title || spec.title} - ${page.part}` : (info.title || spec.title),
+          kind: isBangumi ? 'episode' : 'movie',
+          title: isBangumi && page?.part
+            ? `${info.title || spec.title} - ${page.part}`
+            : (info.title || spec.title),
           showTitle: info.title || spec.title,
-          season: isEpisode ? 1 : undefined,
-          episode: isEpisode ? (Number(spec.pageIndex || 0) + 1) : undefined,
+          season: isBangumi ? 1 : undefined,
+          episode: isBangumi ? (Number(spec.pageIndex || 0) + 1) : undefined,
           plot: info.desc,
           pubdate: info.pubdate,
           duration: page?.duration || info.duration || spec.duration,
@@ -999,6 +1010,10 @@ export async function ensureSpecComplete(spec, api, isCanceled = () => false) {
       pic: info.pic,
       tname: info.tname,
       tid: info.tid,
+      // 互动视频（stein gate）标记。B 站的互动视频有多个分支剧情，
+      // 我们目前只下主线（默认分支），分支展开未实现 —— 先识别出来，
+      // 好在日志里给出明确提示，而不是让用户以为是下载失败。
+      steinGate: !!info.rights?.is_stein_gate,
       pages,
     };
   }

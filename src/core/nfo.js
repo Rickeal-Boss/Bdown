@@ -7,17 +7,43 @@
  * 设计原则：
  *   - **纯函数**，不碰网络、不碰存储，可 100% CI 覆盖
  *   - **缺字段就省略该元素**，不写空标签（Jellyfin 对空值容忍度差）
- *   - 所有文本走 escapeXml，B 站返回的标题/简介里可能有 & < > 和引号
+ *   - 文本先**剥离控制字符**再做 XML 实体转义
+ *   - 不写 `<fileinfo><streamdetails>`（会覆盖 Jellyfin 自己的探测结果）
  *
  * 两种形态：
- *   - `movie`   —— 普通视频、单P（Kodi 电影库）
- *   - `episode` —— 番剧 / 多P（Kodi 剧集库，需要 season + episode 序号）
+ *   - `movie`   —— 普通视频（**含多P**）
+ *   - `episode` —— 番剧 / 课程
+ *   形态按**视频类型**判定，不按 P 数判定。
  */
 
-/** XML 文本转义。B 站的标题/简介里确实出现过 & 与引号。 */
+/**
+ * 控制字符（XML 1.0 里非法的那些）。
+ *
+ * 用 String.fromCharCode 构造而**不写反斜杠转义**：本项目踩过坑——
+ * 通过 shell heredoc 写文件时，形如 U+0000 的转义会被解释成真正的控制字符
+ * 写进源码，直接把文件变成语法错误。
+ */
+const CONTROL_CHARS = new RegExp(
+  '['
+  + String.fromCharCode(0) + '-' + String.fromCharCode(8)
+  + String.fromCharCode(11) + String.fromCharCode(12)
+  + String.fromCharCode(14) + '-' + String.fromCharCode(31)
+  + String.fromCharCode(127)
+  + ']',
+  'g',
+);
+
+/**
+ * XML 文本转义 —— **先剥离控制字符，再做 5 实体转义**。
+ *
+ * 为什么必须先剥离控制字符：视频简介（desc）是自由文本，确实含控制字符。
+ * 它们**不是合法 XML 1.0 字符**，会让整个 NFO 解析失败，而 Jellyfin 只会
+ * 静默丢弃该文件 —— 用户完全不知道为什么没刮削到。这是本功能的 P0。
+ */
 export function escapeXml(value) {
   if (value === undefined || value === null) return '';
   return String(value)
+    .replace(CONTROL_CHARS, '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -25,14 +51,36 @@ export function escapeXml(value) {
     .replace(/'/g, '&apos;');
 }
 
-/** Unix 秒 -> `YYYY-MM-DD`。非法输入返回空串。 */
+/** 超长文本截断（B 站简介可达数万字符，没必要全塞进 NFO）。 */
+export function truncateText(value, max = 10000) {
+  if (value === undefined || value === null) return '';
+  const s = String(value);
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/**
+ * Unix 秒 -> `YYYY-MM-DD`，**按 Asia/Shanghai 格式化**。
+ *
+ * 为什么必须指定时区：B 站的 pubdate 是北京时间语义。若按 UTC 或运行环境的
+ * 本地时区格式化，**凌晨发布的视频会差一天**（我们的 CI 跑在 UTC 上，必现）。
+ */
 export function isoDate(unixSeconds) {
   const n = Number(unixSeconds);
   if (!Number.isFinite(n) || n <= 0) return '';
   const d = new Date(n * 1000);
   if (Number.isNaN(d.getTime())) return '';
-  const p = (x) => String(x).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  try {
+    // en-CA 的短日期格式正好是 YYYY-MM-DD
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(d);
+  } catch {
+    const p = (x) => String(x).padStart(2, '0');
+    return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
+  }
 }
 
 /** 秒 -> 分钟（Jellyfin 的 runtime 单位是分钟）。 */
@@ -42,12 +90,7 @@ export function runtimeMinutes(seconds) {
   return Math.round(n / 60);
 }
 
-/**
- * 只在值非空时输出一个元素。
- * @param {string} tag 元素名
- * @param {unknown} value 值
- * @param {Record<string,string>} [attrs] 属性
- */
+/** 只在值非空时输出一个元素。 */
 function el(tag, value, attrs) {
   if (value === undefined || value === null || value === '') return '';
   const attrStr = attrs
@@ -62,19 +105,20 @@ const XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>\n';
  * 生成 NFO 文本。
  *
  * @param {object} meta
- * @param {'movie'|'episode'} [meta.kind] 默认 movie
- * @param {string} [meta.title] 标题
- * @param {string} [meta.plot] 简介
- * @param {number} [meta.pubdate] 发布时间（Unix 秒）
+ * @param {'movie'|'episode'} [meta.kind] 默认 movie。**按视频类型传**：
+ *        普通视频（含多P）传 movie；番剧 / 课程传 episode
+ * @param {string} [meta.title]
+ * @param {string} [meta.plot] 简介（会自动剥离控制字符 + 截断到 10000 字）
+ * @param {number} [meta.pubdate] 发布时间（Unix 秒，按北京时间格式化）
  * @param {number} [meta.duration] 时长（秒）
  * @param {string} [meta.cover] 封面 URL
- * @param {{name?:string, mid?:number|string}} [meta.owner] UP 主
- * @param {string} [meta.genre] 分区名
+ * @param {{name?:string, mid?:number|string, face?:string}} [meta.owner] UP 主
+ * @param {string} [meta.genre] B 站分区名
  * @param {string} [meta.bvid]
  * @param {string|number} [meta.aid]
  * @param {number} [meta.season] 季号（episode 用）
  * @param {number} [meta.episode] 集号（episode 用）
- * @param {string} [meta.showTitle] 剧集总标题（episode 用）
+ * @param {string} [meta.showTitle] 番剧/课程总标题（episode 用）
  * @returns {string} NFO XML
  */
 export function buildNfo(meta = {}) {
@@ -82,39 +126,41 @@ export function buildNfo(meta = {}) {
   const date = isoDate(meta.pubdate);
   const year = date ? date.slice(0, 4) : '';
   const runtime = runtimeMinutes(meta.duration);
-  const id = meta.bvid || (meta.aid ? `av${meta.aid}` : '');
+  const bvid = meta.bvid || '';
+  const aid = meta.aid ? String(meta.aid) : '';
+  const pageUrl = bvid ? `https://www.bilibili.com/video/${bvid}` : '';
 
   let body = '';
   body += el('title', meta.title);
   if (kind === 'episode') {
-    // 剧集：用总标题做 showtitle，本集标题做 title
     body += el('showtitle', meta.showTitle || meta.title);
     body += el('season', meta.season);
     body += el('episode', meta.episode);
   }
-  body += el('plot', meta.plot);
+  body += el('plot', truncateText(meta.plot));
   body += el('year', year);
   body += el('premiered', date);
   body += el('aired', date);
   body += el('runtime', runtime);
-  body += el('studio', 'bilibili');
   body += el('genre', meta.genre);
 
   if (meta.owner?.name) {
-    // UP 主放进 actor，Jellyfin 会显示成"演员"，是最接近的可用字段
+    // UP 主放进 actor：Kodi/Jellyfin 没有"创作者"对应元素，这是最接近的可用字段
     body += '  <actor>\n';
     body += el('name', meta.owner.name);
     body += el('role', 'UP主');
+    if (meta.owner.face) body += el('thumb', meta.owner.face);
     body += '  </actor>\n';
   }
 
-  if (meta.cover) {
-    body += el('thumb', meta.cover, { aspect: 'poster' });
+  if (meta.cover) body += el('thumb', meta.cover, { aspect: 'poster' });
+  body += el('source', 'Bilibili');
+  body += el('website', pageUrl);
+  if (bvid) {
+    body += el('id', bvid);
+    body += el('uniqueid', bvid, { type: 'bilibili', default: 'true' });
   }
-  if (id) {
-    body += el('id', id);
-    body += el('uniqueid', id, { type: 'bilibili', default: 'true' });
-  }
+  if (aid) body += el('uniqueid', aid, { type: 'avid' });
 
   const root = kind === 'episode' ? 'episodedetails' : 'movie';
   return `${XML_DECL}<${root}>\n${body}</${root}>\n`;
@@ -122,26 +168,29 @@ export function buildNfo(meta = {}) {
 
 /**
  * 生成剧集总信息（tvshow.nfo）。
- * 多P / 番剧批量下载时，一个目录下放一份即可。
+ *
+ * **目前未接线到下载流程**：Jellyfin 要求 tvshow.nfo 位于剧集专属目录，
+ * 而我们输出到平铺目录，写一个固定 tvshow.nfo 会污染同目录的其他内容。
+ * 保留函数，供将来「按番剧建子目录」时使用。
  */
 export function buildTvShowNfo(meta = {}) {
   let body = '';
   body += el('title', meta.title);
-  body += el('plot', meta.plot);
+  body += el('plot', truncateText(meta.plot));
   body += el('year', isoDate(meta.pubdate).slice(0, 4));
   body += el('premiered', isoDate(meta.pubdate));
-  body += el('studio', 'bilibili');
   body += el('genre', meta.genre);
+  body += el('source', 'Bilibili');
   if (meta.cover) body += el('thumb', meta.cover, { aspect: 'poster' });
-  const id = meta.bvid || (meta.aid ? `av${meta.aid}` : '');
-  if (id) {
-    body += el('id', id);
-    body += el('uniqueid', id, { type: 'bilibili', default: 'true' });
+  const bvid = meta.bvid || '';
+  if (bvid) {
+    body += el('id', bvid);
+    body += el('uniqueid', bvid, { type: 'bilibili', default: 'true' });
   }
   return `${XML_DECL}<tvshow>\n${body}</tvshow>\n`;
 }
 
-/** NFO 文件名：与媒体文件同基名（Jellyfin 的识别约定）。 */
+/** NFO 文件名：与媒体文件同基名（Jellyfin 识别约定，多P 天然不覆盖）。 */
 export function nfoFilename(mediaFilename = '') {
   const base = String(mediaFilename || '').replace(/\.[^.]+$/, '');
   return `${base || 'movie'}.nfo`;
