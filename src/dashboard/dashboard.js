@@ -60,6 +60,13 @@ function ensureNode(task) {
     task.progress = 0;
     task.downloadedBytes = 0;
     task.outputs = [];
+    // 这些也必须清：留着会让 UI 显示上一轮的进度/速率/完成时间/输出名
+    task.errorMessage = '';
+    task.phaseText = '';
+    task.totalBytes = 0;
+    task.speed = 0;
+    task.eta = 0;
+    task.finishedAt = 0;
     renderTask(task);
     startTask(task);
   });
@@ -190,6 +197,32 @@ async function pickDestination(taskCount) {
   }
 }
 
+/**
+ * 从 chrome.storage 的 pendingTasks 里移除与 task 对应的条目。
+ * 匹配依据：cid + pageIndex（同一视频的同一 P）。
+ */
+async function prunePendingTask(task) {
+  try {
+    const { pendingTasks = [] } = await chrome.storage.local.get('pendingTasks');
+    if (!pendingTasks.length) return;
+    const spec = task.spec || task;
+    const cid = Number(spec.cid || 0);
+    const page = Number(spec.pageIndex || 0);
+    const next = pendingTasks.filter((s) => {
+      if (!s || typeof s !== 'object') return false;
+      const sameCid = cid > 0 && Number(s.cid || 0) === cid;
+      const sameBvid = spec.bvid && s.bvid === spec.bvid;
+      if (!sameCid && !sameBvid) return true;      // 不相关，保留
+      return Number(s.pageIndex || 0) !== page;    // 相关且同 P -> 移除
+    });
+    if (next.length !== pendingTasks.length) {
+      await chrome.storage.local.set({ pendingTasks: next });
+    }
+  } catch {
+    /* 清理失败不影响主流程 */
+  }
+}
+
 async function startTask(task) {
   if (task.status !== 'pending' && task.status !== 'error' && task.status !== 'canceled') return;
   const destination = await pickDestination(1);
@@ -204,6 +237,10 @@ async function startTask(task) {
     runningCount -= 1;
     updateCounts();
     persistHistory();
+    // 任务已到终态（done / error / canceled）：把 chrome.storage 里对应的
+    // pendingTasks 条目清掉。否则用户取消后关掉下载中心再打开，
+    // 那个已取消的任务会被重新入队（用户以为自己取消成功了）。
+    await prunePendingTask(task);
     if (task.status === 'done' && settings.notifyOnComplete) {
       showToast(`已完成：${task.filename || task.title}`);
     }
