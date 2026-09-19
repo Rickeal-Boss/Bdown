@@ -27,12 +27,17 @@ const DEL = String.fromCharCode(127);
  *
  * Node 22 目前**没有** DOMParser（实测 `new DOMParser()` 抛 ReferenceError），
  * 所以这里提供零依赖的等价校验，CI 一定能跑。
+ *
+ * ⚠ 这里**不能带 `g` 标志**：带 `g` 的正则配合 `.test()` 是有状态的
+ * （每次匹配后推进 lastIndex），多次调用会交替返回 true/false ——
+ * 结果就是这个校验**时灵时不灵**，属于典型的测试假阴性陷阱。
+ * （`String.replace` 配 `g` 是安全的，因为 replace 结束后会重置 lastIndex。）
  */
 const CTRL = new RegExp('['
   + String.fromCharCode(0) + '-' + String.fromCharCode(8)
   + String.fromCharCode(11) + String.fromCharCode(12)
   + String.fromCharCode(14) + '-' + String.fromCharCode(31)
-  + String.fromCharCode(127) + ']', 'g');
+  + String.fromCharCode(127) + ']');
 
 function xmlProblems(xml) {
   const problems = [];
@@ -250,6 +255,73 @@ console.log('\n[11] 产物可被 XML 解析器解析（有 DOMParser 就用，�
   const dirty = buildNfo({ title: 't', plot: 'x' + NUL + 'y' });
   ok('含控制字符的简介不会破坏 XML 合法性',
     xmlProblems(dirty).length === 0, xmlProblems(dirty).join('; '));
+}
+
+console.log('\n[12] 空白字符串不能绕过回退链 / 判空（qa-lead 复核发现的漏网形态）');
+{
+  // A1：title 只含换行/空白时，回退链必须生效
+  const nl = buildNfo({ title: '\n', bvid: 'BV1xx411c7mD' });
+  ok('★ title 只含换行时回退到 bvid', nl.includes('<title>BV1xx411c7mD</title>'), nl);
+  const sp = buildNfo({ title: '   ', aid: 2 });
+  ok('★ title 只含空格时回退到 av 号', sp.includes('<title>av2</title>'), sp);
+  const both = buildNfo({ title: '\n\t  ' });
+  ok('★ title 只含空白且无 bvid/aid 时 -> 未知标题',
+    both.includes('<title>未知标题</title>'), both);
+  ok('★ 任何情况下都有非空 title 元素',
+    [nl, sp, both, buildNfo(), buildNfo({})].every((x) => /<title>[^<]+<\/title>/.test(x)));
+
+  // A2：genre 只有空白 -> 不输出（Jellyfin 会当成奇怪的分类）
+  const g = buildNfo({ title: 'x', genre: '   ' });
+  ok('genre 只有空白时不输出', !g.includes('<genre'), g);
+  const g2 = buildNfo({ title: 'x', genre: ' 知识 ' });
+  ok('genre 有内容时保留（不误杀）', g2.includes('<genre>'), g2);
+
+  // A3：tvshow 同病
+  const tv = buildTvShowNfo({ title: '\n', bvid: 'BV1xx411c7mD' });
+  ok('tvshow 的 title 只含换行时也回退到 bvid',
+    tv.includes('<title>BV1xx411c7mD</title>'), tv);
+}
+
+console.log('\n[13] 校验器本身必须无状态（防 lastIndex 陷阱）');
+{
+  const clean = buildNfo({ title: 'a', plot: 'b', bvid: 'BV1xx411c7mD' });
+  const dirty = buildNfo({ title: 'a', plot: 'x' + NUL + 'y', bvid: 'BV1xx411c7mD' });
+  // 交替调用：若 CTRL 正则带 g 标志，这里会时灵时不灵
+  const r1 = xmlProblems(clean).length;
+  const r2 = xmlProblems(dirty).length;
+  const r3 = xmlProblems(clean).length;
+  const r4 = xmlProblems(dirty).length;
+  ok('干净文档连续两次结果一致', r1 === r3, `${r1} vs ${r3}`);
+  ok('脏文档连续两次结果一致', r2 === r4, `${r2} vs ${r4}`);
+  ok('干净文档 = 0 问题', r1 === 0, String(r1));
+  ok('脏文档 = 有问题（控制字符被检出）', r2 > 0, String(r2));
+}
+
+console.log('\n[14] 标签白名单（避免"测试抄实现"的循环论证）');
+{
+  // 不从实现里抄黑名单 —— 先列出**允许出现**的标签，再断言没有越界的。
+  // 这样新增标签时会失败并提醒确认，而不是被一个抄来的黑名单悄悄放过。
+  const ALLOWED = new Set([
+    'movie', 'episodedetails', 'tvshow',
+    'title', 'showtitle', 'season', 'episode', 'plot',
+    'year', 'premiered', 'aired', 'runtime', 'genre',
+    'actor', 'name', 'role', 'thumb',
+    'source', 'website', 'id', 'uniqueid',
+  ]);
+  for (const [label, fn] of [['movie', buildNfo], ['tvshow', buildTvShowNfo]]) {
+    for (const meta of [
+      { title: 't', plot: 'p', pubdate: 1704153600, duration: 754, cover: 'https://x/c.jpg',
+        owner: { name: 'u', face: 'https://x/f.jpg' }, genre: '知识', bvid: 'BV1xx411c7mD', aid: 2 },
+      { kind: 'episode', title: 'e', showTitle: 's', season: 1, episode: 3, bvid: 'BV1xx411c7mD' },
+      {},
+    ]) {
+      const xml = fn(meta);
+      const tags = [...xml.matchAll(/<([a-zA-Z][a-zA-Z0-9]*)/g)].map((m) => m[1]);
+      const unknown = tags.filter((t) => !ALLOWED.has(t));
+      ok(`${label} 只输出白名单内的标签（${JSON.stringify(meta).slice(0, 24)}…）`,
+        unknown.length === 0, `越界标签: ${[...new Set(unknown)].join(', ')}`);
+    }
+  }
 }
 
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} NFO 模块自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);

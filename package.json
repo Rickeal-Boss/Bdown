@@ -1,6 +1,6 @@
 {
   "name": "bdown",
-  "version": "1.4.17",
+  "version": "1.4.18",
   "private": true,
   "description": "Bdown - B站视频下载助手（Microsoft Edge / Chrome MV3 扩展）",
   "type": "module",

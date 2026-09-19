@@ -539,6 +539,13 @@ export function buildMergedMoov(videoMoov, audioMoov, durationSeconds, movieTime
   patchTrackId(vTrakBytes, 'tkhd', 1);
   patchTrackId(aTrakBytes, 'tkhd', 2);
 
+  // --- HEVC 兼容性：`hev1` -> `hvc1`
+  // B 站部分 HEVC 流的 stsd sample entry 写的是 `hev1`，而 QuickTime / Safari /
+  // iOS 相册**只认 `hvc1`**，导致合并产物在这些播放器里无法解码（画面不出来）。
+  // 视频字节本身不需要改，只要把 sample entry 的 4CC 换掉即可
+  // （与 mp4box / ffmpeg 的默认行为一致）。
+  patchSampleEntryTag(vTrakBytes, 'hev1', 'hvc1');
+
   // --- mvex：mehd + trex(1) + trex(2)
   const mehdPayload = new Uint8Array(8);
   new DataView(mehdPayload.buffer).setUint32(4, Math.round(durationSeconds * scale));
@@ -556,6 +563,36 @@ export function buildMergedMoov(videoMoov, audioMoov, durationSeconds, movieTime
   const parts = [mvhd, mvex, vTrakBytes, aTrakBytes];
   if (udta) parts.push(videoMoov.slice(udta.start, udta.end));
   return makeBox('moov', concatBytes(parts));
+}
+
+/**
+ * 把 trak 里的某个 4CC 标签替换成另一个（等长，4 字节）。
+ *
+ * 用途：HEVC 的 `hev1` -> `hvc1`。两者描述的是同一份码流，
+ * 只是 `hvc1` 要求参数集（VPS/SPS/PPS）放在 sample entry 里、
+ * `hev1` 允许放在码流中；Apple 系实现只接受 `hvc1`。
+ *
+ * @returns {number} 实际替换的次数
+ */
+function patchSampleEntryTag(trakBytes, from, to) {
+  if (!from || !to || from.length !== 4 || to.length !== 4) return 0;
+  const fc = [from.charCodeAt(0), from.charCodeAt(1), from.charCodeAt(2), from.charCodeAt(3)];
+  const tc = [to.charCodeAt(0), to.charCodeAt(1), to.charCodeAt(2), to.charCodeAt(3)];
+  let count = 0;
+  for (let i = 0; i + 4 <= trakBytes.length; i += 1) {
+    if (
+      trakBytes[i] === fc[0] && trakBytes[i + 1] === fc[1]
+      && trakBytes[i + 2] === fc[2] && trakBytes[i + 3] === fc[3]
+    ) {
+      trakBytes[i] = tc[0];
+      trakBytes[i + 1] = tc[1];
+      trakBytes[i + 2] = tc[2];
+      trakBytes[i + 3] = tc[3];
+      count += 1;
+      i += 3;
+    }
+  }
+  return count;
 }
 
 function patchTrackId(trakBytes, type, id) {

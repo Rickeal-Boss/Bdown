@@ -118,6 +118,9 @@ export function runtimeMinutes(seconds) {
 function isEmpty(value) {
   if (value === undefined || value === null) return true;
   if (value === '') return true;
+  // 只有空白的字符串也算空：B 站数据里确实有 `genre: '   '` 这类值，
+  // 不 trim 会输出 `<genre>   </genre>`（Jellyfin 会当成一个奇怪的分类）
+  if (typeof value === 'string' && value.trim() === '') return true;
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) return true;
     if (value === 0) return true;
@@ -178,9 +181,14 @@ export function buildNfo(meta = {}) {
   // 所以必须有回退链兜底。
   // 回退用 bvid 而不是 task.filename —— filename 带 `P{n}_{part}` 与清晰度后缀，
   // 会污染标题。
-  const title = collapseNewlines(
-    meta.title || meta.bvid || (meta.aid ? `av${meta.aid}` : '') || '未知标题',
-  );
+  // 顺序很关键：**先折叠空白，再走回退链**。
+  // 若写成 `collapseNewlines(meta.title || meta.bvid || ...)`，
+  // 那么 `meta.title = '\n'`（或 `'   '`）是 truthy，回退链不会生效，
+  // 折叠后变成空串 -> `<title>` 被整个省略 -> Jellyfin 静默丢弃（qa-lead 复核发现）。
+  const title = collapseNewlines(meta.title)
+    || meta.bvid
+    || (meta.aid ? `av${meta.aid}` : '')
+    || '未知标题';
 
   let body = '';
   // 标题里的换行折叠成空格（Jellyfin 会原样显示，换行会让列表错乱）；
@@ -229,10 +237,12 @@ export function buildNfo(meta = {}) {
  */
 export function buildTvShowNfo(meta = {}) {
   let body = '';
-  // 与 buildNfo 同样的 `<title>` 回退链 —— 没有标题的 tvshow.nfo 同样是白写
-  body += el('title', collapseNewlines(
-    meta.title || meta.bvid || (meta.aid ? `av${meta.aid}` : '') || '未知标题',
-  ));
+  // 与 buildNfo 同样的 `<title>` 回退链 —— 没有标题的 tvshow.nfo 同样是白写。
+  // 同样要**先折叠空白再回退**，否则 `title = '\n'` 会绕过回退链（qa-lead 复核发现）
+  body += el('title', collapseNewlines(meta.title)
+    || meta.bvid
+    || (meta.aid ? `av${meta.aid}` : '')
+    || '未知标题');
   body += el('plot', truncateText(meta.plot));
   body += el('year', isoDate(meta.pubdate).slice(0, 4));
   body += el('premiered', isoDate(meta.pubdate));
