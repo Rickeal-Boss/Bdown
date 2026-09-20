@@ -1,12 +1,82 @@
-# 修复验证状态台账（v1.5.0）
+# 修复验证状态台账
 
-**日期**：2026-09-19
-**commit**：`fc3bcf8`（v1.4.1）
+**最新**：v1.4.21（2026-09-20）
 **原则**：区分「已实测验证」「静态确认」「待测」三类。**不接受"改了就是已修"**。
 
 ---
 
-## 一、已实测验证（Verified）
+## 零之前、v1.4.21 复审轮的验证状态
+
+### 已实测验证（Verified）
+
+| 项 | 验证方式 | 结果 |
+|---|---|---|
+| **弹窗谎报可用档位**（P0） | 用真实响应复刻 `popup.js` 的 `available` 判定 | UI 把 116/80/64 全标"可用"，实际只下到 32 → 证实 ✅ |
+| **`pickExactTrack` 修复有效** | `test-quality-pick.mjs` [8]（10 项） | 无精确档时返回 `null`；反证 `pickVideoTrack` 仍会回退返回 32 ✅ |
+| **无可用档就近取档** | `test-quality-pick.mjs` [9] | 请求 16 且只有 [80,64] → 取 64（不是 80）✅ |
+| **候选档位并集** | `test-quality-pick.mjs` [10] | accept 漏报/虚报两种场景都正确 ✅ |
+| **`accept_quality` 实际排序** | 公开接口实测 4 个视频 | 全部降序（`[116,80,64,32,16]` / `[32,16]` / `[112,80,64,32,16]` / `[16]`）—— 降序不是契约，故仍改用 `Math.max` ✅ |
+| **durl 模式下 qn 的行为** | 公开接口实测 fnval=1，qn=16/64/80/127 | `data.quality` 恒为 16、durl 段数恒为 1 → 传 127 无副作用 ✅ |
+| **DNR 规则 4 不再覆盖通用 CDN** | `test-dnr-side-effects.mjs` [7] | 不含 `akamaized.net`，仍含 B 站专属 CDN ✅ |
+| **规则 3 同时设 Origin + Referer** | `test-dnr-side-effects.mjs` [9]（5 项） | 静态规则与动态严格规则都设了 ✅ |
+| **课程链接解析** | `test-extract-id.mjs` [3] | `/cheese/play/ep123` → `{cheeseId}`；反证旧实现返回 `{epId}` ✅ |
+| **控制字符 lint 有效** | 注入 NUL 字节 → 必须报错 | 报错 ✅（非空洞） |
+| **包内容与源码一致** | `cmp -s` 逐字节比对 9 个关键文件 | 全部 OK ✅ |
+| **Cookie 携带机制** | 无头 Edge + 最小 MV3 扩展实测 | 有 `host_permissions` → 全部 cookie 都带（含 `SameSite=Strict`）✅ |
+| CI 全绿 | `node tools/test-*.mjs` × 19 套件 | **504 项通过 / 0 失败** ✅ |
+
+### 静态确认（Static）— 必须真机复验
+
+| 项 | 位置 | 状态 |
+|---|---|---|
+| **规则 3/4 加 `excludedInitiatorDomains` 后主页面登录恢复** | `rules/referer.json` | 语义已核对 Chrome 官方文档；**需真机确认那 4 个页面能正常登录** |
+| **动态严格规则注册成功** | `src/background/service-worker.js` | 需真机在 `chrome://extensions` 看 service worker 无报错 |
+| **扩展自身请求仍能绕开 WAF 412** | 同上 | 需真机确认弹窗能正常解析（即 `api.bilibili.com` 未被拦） |
+| **弹窗显示 = 实际下载** | `src/popup/popup.js` | 本轮核心验收项，必须真机确认 |
+
+### 已证伪（Ruled Out）
+
+| 假设 | 证伪方式 |
+|---|---|
+| "扩展请求没带 SESSDATA cookie" | 无头 Edge 实测：有 `host_permissions` 时全部 cookie 都带，含 `SameSite=Strict` |
+| "DASH 下 qn 是上限，传 127 会被降级" | 公开接口实测：qn=16/64/80/127 返回轨道集合完全一致 |
+
+---
+
+## 零、v1.4.20 修复的验证状态
+
+### 0.1 已实测验证（Verified）
+
+| 项 | 验证方式 | 结果 |
+|---|---|---|
+| **DASH 下 qn 无效**（决定性实证） | 公开接口实测 BV1uv411q7Mv，未登录态传 qn=16/64/80/127 | `dash.video[].id` 集合**四次完全一致** = `[32,32,16,16]`；`accept_quality` 恒为 `[116,80,64,32,16]` ✅ 证明兜底 qn 无意义 |
+| **字符串 "0" 的 falsy 陷阱** | `node -e` 实测 `!"0"` | 返回 `false`（字符串 "0" 是 truthy）→ 证实旧 `if (!quality)` 会跳过自动分支 ✅ |
+| **buildPlan 在 defaultQuality="0" 时的行为** | `tools/test-quality-pick.mjs` [6] | 修复后选 80；修复前会降到 accept 最小档 16 ✅ |
+| **qn=0 实际请求 127 且不带 try_look** | `tools/test-playurl-routing.mjs` [4][5] | 4 种账号状态（会员/非会员/未登录/nav 抖动）全部 qn=127、无 try_look ✅ |
+| **DNR 规则不再命中 bilibili.com 系域名** | `tools/test-dnr-side-effects.mjs`（26 项） | 规则 3/4 的 regexFilter 均不含 bilibili.com/tv/b23.tv；都有 `excludedInitiatorDomains:["bilibili.com"]` ✅ |
+| **打包产物内容正确** | `unzip -p` 回读包内 manifest / rules | 版本 1.4.20、minChrome 116、规则 3/4 收窄生效 ✅ |
+| CI 全绿 | `node tools/test-*.mjs` × 17 套件 | **433 项通过 / 0 失败** ✅ |
+
+### 0.2 静态确认（Static）— 必须真机复验
+
+| 项 | 位置 | 状态 |
+|---|---|---|
+| **规则 4 不再误伤 passport.bilibili.com** | `rules/referer.json` id=4 | regexFilter 已改到 CDN 域名；**需真机确认这些页面能正常登录** |
+| **`excludedInitiatorDomains` 生效** | `rules/referer.json` id=3/4 | 语法与语义已核对 Chrome 官方文档（Chrome 101+，子域自动覆盖）；**需真机确认扩展自身请求仍能绕 WAF** |
+| **扩展自身请求未被误排除** | 同上 | 扩展 initiator 是 `chrome-extension://<id>`，按文档不会被 `"bilibili.com"` 排除；**需真机确认下载仍能成功** |
+| content.js 不依赖 DNR 注入头 | `src/content/content.js` | 已 Grep 确认只发 `sendMessage`，不发 fetch ✅（静态） |
+| **登录态下能拿到 1080P** | `src/core/api.js` / `engine.js` | qn 传 127 + 客户端按 quality 挑最高；**这是本轮的最终验收项，必须真机确认** |
+
+### 0.3 未确认项（Unknown）
+
+| 项 | 说明 |
+|---|---|
+| 登录态下 `dash.video[]` 的实际档位集合 | 无法在不使用用户 cookie 的前提下实测。已加诊断日志，真机跑一次即可看到 |
+| `try_look` 是否曾真的把已登录用户打成 360P | 无公开来源支持，但 yt-dlp 主动 `pop('try_look')` 属于同类规避；本版直接移除该参数，无副作用 |
+
+---
+
+## 一、历史：已实测验证（Verified）
 
 以下各项均**实际运行过**，不是"声称"已修。
 

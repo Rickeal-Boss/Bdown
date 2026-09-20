@@ -18,15 +18,25 @@ const API = 'https://api.bilibili.com';
 const REFERER = 'https://www.bilibili.com/';
 
 /**
- * 浏览器原生 fetch 在扩展页面调用时只自动加 `Referer`（取决于调用方式），
- * UA 也只会是 Chrome 自己的。B 站近年的风控对扩展来源 UA（无 Edg/Chrome 字样 +
- * 无 Origin）的请求直接返回 code=-400，症状是「请求参数错误」——但实际是服务器
- * 端的来源校验，不是参数问题。
+ * 请求头。
  *
- * 参照 `stevenjoezhang/bilibili-downloader` 与 `bilibili-helper-o` 的
- * fetch headers：显式设置桌面浏览器 UA、Origin、Referer。
+ * ⚠️ **重要事实（v1.4.21 更正）**：`Referer`、`Origin`、`User-Agent` 都是 Fetch 规范里的
+ * **forbidden header name** —— 在 `fetch()` 的 headers 里设置它们会被浏览器**静默丢弃**
+ * （不报错、不警告、不生效）。所以下面这几行里：
+ *   - `User-Agent` → 无效，但**无所谓**：扩展发起的请求本来就带浏览器真实 UA
+ *   - `Origin`    → 无效，**由 DNR 规则 3 补**（`rules/referer.json`）
+ *   - `Referer`   → 无效，**由 DNR 规则 3 补**（v1.4.21 补上，之前一直是缺失的）
  *
- * ——证据：本机 curl / Node fetch 怎么发都 code:0；浏览器扩展场景下 -400。
+ * 保留它们只是**文档作用**（表明我们期望的请求画像），真正生效的是 DNR。
+ *
+ * 历史教训：早期注释写着"显式设置桌面浏览器 UA、Origin、Referer"，并据此认为
+ * 来源校验已解决 —— 但 fetch 层根本设不了这三个头，实际送达的只有
+ * 浏览器默认值 + DNR 补的那部分。v1.4.21 才发现 `Referer` 从未送达，
+ * 于是请求画像是"**有 Origin 却无 Referer**"这一异常组合。
+ *
+ * 请求画像（DNR 生效后）：`Origin: https://www.bilibili.com` +
+ * `Referer: https://www.bilibili.com/`，与 B 站自己页面的请求一致，
+ * 避免异常指纹被风控识别。
  */
 const COMMON_HEADERS = {
   'User-Agent':
@@ -349,27 +359,23 @@ export class BiliApi {
    * @returns {Promise<PlayInfo>}
    */
   async playurl({ bvid, aid, cid, qn = 127, mode = 'dash', epId, cheeseId, fourk = 1 }) {
-    // 三态：true=已确认登录 / false=已确认未登录 / null=**拿不到登录态**（nav 失败且无缓存）
+    // 先探测一次登录态：**只为刷新 this.account 缓存**（dashboard / 设置页的
+    // 登录徽章依赖它），**不再用它决定 qn**。失败不抛（catch → null）。
+    await this.ensureAccount().catch(() => null);
+
+    // 自动清晰度（qn=0）时请求什么值？**始终 127（最大档）**。
     //
-    // 为什么不能用二态：nav 偶发失败（WAF / 断网）时如果一律当"未登录"，
-    // playurl 就会带上 `try_look=1`（B 站的"未登录试看"参数），服务端很可能
-    // 只返回低清试看流 —— 用户明明登录了却下到 360P，且完全不知道原因。
-    // 拿不到登录态时要**保守**：不带 try_look，把判断权留给服务端 Cookie。
-    const logged = await this.ensureAccount()
-      .then((a) => (a && typeof a.isLogin === 'boolean' ? a.isLogin : null))
-      .catch(() => null);
-    // 自动清晰度的取值（qn=0 表示「让客户端按账号挑」）。
+    // 旧实现按账号兜底：`vip ? 127 : (logged ? 80 : 64)`。这个兜底有两个致命问题：
+    //   1. nav 偶发失败（WAF / 断网）时拿不到账号 → 落到 **64**，
+    //      等于客户端主动给自己设了 720P 上限。用户明明登录了也拿不到 1080P。
+    //   2. 未登录实测（BV1uv411q7Mv，2026-09-19）：传 qn=16/64/80/127 返回的
+    //      dash.video[].id 集合**完全一致**（都是 [32,32,16,16]），说明低权限下
+    //      qn 根本不影响返回集合 —— 那兜底成 64 纯属自我设限，毫无收益。
     //
-    // B 站的清晰度上限规则：
-    //   - 大会员       → 全部（8K / 4K / HDR / 1080P60 / 1080P+ 高码率）
-    //   - 已登录非会员 → 1080P 30 帧（非高码率）
-    //   - 少数限免影片 → 满血清晰度（B 站自己放行，无需客户端特殊处理）
-    //
-    // 这里不能直接写 127：对已登录非会员，B 站遇到超出权限的 qn 会把整份
-    // 清单降级成 360P 预览，反而比 1080P 更差。也不能写 0：实测 qn=0 时
-    // 响应里 accept_quality 为 null，拿不到可用清单。
-    const account = await this.ensureAccount().catch(() => null);
-    const resolvedQn = qn > 0 ? qn : (account && account.vip ? 127 : (logged ? 80 : 64));
+    // 正确做法：请求最大值，让服务端按账号权限返回它能给的全部轨道，
+    // 清晰度完全交给客户端从 dash.video[] 里挑（见 pickVideoTrack）。
+    // 这也是同类实现（BiliDown / yt-dlp）的做法：fnval=4048 & fourk=1 & qn=127。
+    const resolvedQn = qn > 0 ? qn : 127;
     const kind = cheeseId ? 'pugv' : epId ? 'pgc' : 'ugc';
     const params = {
       cid,
@@ -395,9 +401,20 @@ export class BiliApi {
     };
     if (bvid) params.bvid = bvid;
     else if (aid) params.avid = aid;
-    // 只在**确认**未登录时才带 try_look；登录态未知（logged === null）时不带，
-    // 让服务端按请求里的 Cookie 自行判断，避免误拿试看流
-    if (logged === false) params.try_look = 1;
+    // ★ 不带 try_look。
+    //
+    // try_look=1 是 B 站的"未登录试看"参数。带它有副作用：
+    //   - 已登录用户：不需要，带了可能被服务端判"试看意图"返回低清流
+    //   - 未登录用户：服务端**已经**按 cookie 自行判断，无需额外参数
+    //   - 关键场景：nav 偶发失败 → logged=null → 旧实现落到 logged===false 分支
+    //     → 带 try_look=1 → 服务端按试看返回 → 用户从 1080P 掉到 360P，
+    //     且完全不知道为什么。
+    //
+    // 旧实现的兜底意图是"未登录时主动请求试看流"，但 B 站的接口不带 try_look
+    // 时已经会按 cookie 自动处理（无 cookie → 未登录路径；带 SESSDATA → 已登录路径）。
+    // 显式带 try_look=1 反而会**强制**走试看逻辑，覆盖 cookie 的判断结果。
+    //
+    // 安全做法：永远不带。让服务端按请求里的 Cookie 自己判断。
 
     // 课程（pugv）：DownKyi 的注释明确写了「必须有 episodeId，否则会返回请求
     // 错误（code -400）」—— 所以 cheeseId 是必填，不能像番剧那样只给 cid。
@@ -640,7 +657,18 @@ export function pickVideoTrack(videos, quality, preferCodec = 'avc') {
   // B 站按账号权限返回它能给的全部轨道，清晰度必须**在客户端挑**。
   const maxQ = Number(quality) > 0 ? Number(quality) : Infinity;
   const eligible = videos.filter((v) => qOf(v) <= maxQ);
-  const pool = eligible.length ? eligible : videos;
+  let pool = eligible;
+  if (!pool.length) {
+    // 没有任何 ≤ maxQ 的轨道（用户选了一个比全部轨道都低的档，例如选了 360P
+    // 但该视频最低只有 720P）。
+    //
+    // 旧实现 `pool = videos` 会取到**全部轨道里的最高档** —— 用户明确要 360P
+    // 却下到 1080P，既费流量又违背选择。正确做法是取**最接近**的一档
+    // （略高于请求值的最小档），语义上等同于"就近上调"。
+    const above = videos.filter((v) => qOf(v) > maxQ).map(qOf);
+    const nearest = above.length ? Math.min(...above) : null;
+    pool = nearest === null ? videos : videos.filter((v) => qOf(v) === nearest);
+  }
 
   const sorted = [...pool].sort((a, b) => {
     // 1) 清晰度降序 —— 第一优先级。旧实现完全没排清晰度，只按码率取最大，
@@ -658,6 +686,31 @@ export function pickVideoTrack(videos, quality, preferCodec = 'avc') {
     return (b.bandwidth || 0) - (a.bandwidth || 0);
   });
   return sorted[0];
+}
+
+/**
+ * 取**恰好等于**指定清晰度的轨道（同档多编码时按编码偏好挑一条）。
+ *
+ * 与 `pickVideoTrack` 的关键区别：
+ *   - `pickVideoTrack(videos, 80)` = "**不超过** 80 的最高档" → 没有 80 时会回退到 32
+ *   - `pickExactTrack(videos, 80)` = "**必须**是 80" → 没有 80 时返回 `null`
+ *
+ * 为什么需要它：UI 判断"这个档位能不能下"必须用**精确匹配**。若用 pickVideoTrack，
+ * 它会回退到低档并返回一条非空轨道，于是 `!!video` 恒为真 —— UI 会把 1080P60
+ * 标成"可用"，用户选了它，实际下到 360P。这正是「弹窗显示 1080P、文件是 360P」
+ * 的成因（v1.4.20 修复）。
+ *
+ * @param {VideoTrack[]} videos
+ * @param {number} quality 目标清晰度（精确值）
+ * @param {'avc'|'hevc'|'av1'} [preferCodec]
+ * @returns {VideoTrack|null}
+ */
+export function pickExactTrack(videos, quality, preferCodec = 'avc') {
+  const target = Number(quality);
+  if (!Number.isFinite(target) || !videos || !videos.length) return null;
+  const same = videos.filter((v) => Number(v.quality ?? v.id) === target);
+  if (!same.length) return null;
+  return same.length === 1 ? same[0] : pickVideoTrack(same, target, preferCodec);
 }
 
 /** 挑出最优音轨：优先无损/杜比，其次 192K。 */

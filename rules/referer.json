@@ -58,14 +58,21 @@
           "header": "Origin",
           "operation": "set",
           "value": "https://www.bilibili.com"
+        },
+        {
+          "header": "Referer",
+          "operation": "set",
+          "value": "https://www.bilibili.com/"
         }
       ]
     },
     "condition": {
       "regexFilter": "^https?://api\\.bilibili\\.com/",
       "resourceTypes": [
-        "xmlhttprequest",
-        "other"
+        "xmlhttprequest"
+      ],
+      "excludedInitiatorDomains": [
+        "bilibili.com"
       ]
     }
   },
@@ -82,10 +89,12 @@
       ]
     },
     "condition": {
-      "regexFilter": "^https?://([^/?#]*\\.)?(bilibili\\.com|bilibili\\.tv|b23\\.tv)(:\\d+)?/",
+      "regexFilter": "^https?://([^/?#]*\\.)?(bilivideo\\.com|bilivideo\\.cn|hdslb\\.com|biliapi\\.net)(:\\d+)?/",
       "resourceTypes": [
-        "xmlhttprequest",
-        "other"
+        "xmlhttprequest"
+      ],
+      "excludedInitiatorDomains": [
+        "bilibili.com"
       ]
     }
   }

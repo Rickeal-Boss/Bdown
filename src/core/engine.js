@@ -285,6 +285,33 @@ export class DownloadEngine {
         merge: settings.downloadMode,
       });
 
+      // 清晰度诊断日志（用户报「怎么只有 360P」时，看这一行就能定位）：
+      //   - isLogin / vip：扩展**自己探测到**的账号状态（来自 /x/web-interface/nav）
+      //   - accept_quality：服务端"宣称"可给的档位
+      //   - dashVideos：服务端**实际返回**的轨道 id 集合
+      //   - picked：客户端最终选中的轨道
+      //
+      // 判读表（这一行就是为了让"到底哪一环出问题"不再靠猜）：
+      //   isLogin=false            → 扩展没探测到登录态（Cookie 未送达 / 未登录）
+      //   isLogin=true 但 dashVideos 最大只有 16/32
+      //                            → 服务端没按登录态给高画质
+      //                              （Cookie 虽在 nav 生效但 playurl 未带 / 内容本身受限）
+      //   isLogin=true 且 dashVideos 含 80/112，但 picked 更低
+      //                            → 客户端选轨 bug
+      //   accept_quality 有 80 但 dashVideos 没有
+      //                            → 账号权限不足或该内容限制
+      log('清晰度诊断', {
+        isLogin: api.account?.isLogin ?? null,
+        vip: api.account?.vip ?? null,
+        uname: api.account?.uname || '',
+        accept_quality: playInfo.acceptQuality || [],
+        dashVideos: (playInfo.videos || []).map((v) => `${v.quality}/${v.codec}`),
+        dashAudios: (playInfo.audios || []).map((a) => a.id),
+        picked: plan.video ? `${plan.video.quality}/${plan.video.codec}` : '(无视频轨)',
+        specQuality: spec.quality,
+        settingsDefaultQuality: settings.defaultQuality,
+      });
+
       const separate = plan.mode === 'dash' && settings.downloadMode === 'separate';
       const audioOnly = plan.mode === 'dash' && settings.downloadMode === 'audio';
 
@@ -1061,21 +1088,47 @@ export function buildPlan(playInfo, settings, spec) {
   // 真实上限——真实上限只能从返回的轨道里看。
   const trackQualities = (playInfo.videos || [])
     .map((v) => v.quality ?? v.id)
-    .filter((q) => Number(q) > 0);
+    .map(Number)
+    .filter((q) => Number.isFinite(q) && q > 0);
   const maxTrack = trackQualities.length ? Math.max(...trackQualities) : 0;
 
-  let quality = spec.quality || settings.defaultQuality || 0;
-  // 自动（0）：用宣称名单的最高档；名单为空时退回**实际存在的最高档**，
-  // 而不是 videos[0]（数组第一个未必是最高，实测可能是 360P）
-  if (!quality) quality = accept[0] || maxTrack || playInfo.videos[0]?.quality || 0;
+  // ★ 候选档位 = 宣称名单 ∪ **实际存在的轨道档位**。
+  //
+  // 为什么必须取并集（而不是只信 accept_quality）：
+  //   - accept_quality 会**虚报**：实测未登录时宣称 [116,80,64,32,16]，
+  //     而 dash.video 实际只有 [32,16]。只信它 → 算出"请求 116"，
+  //     再被 pickVideoTrack 回退成 32，用户看到的就是"标称高清、实际低清"。
+  //   - accept_quality 也可能**漏报**：某个档位明明有轨道却没列进 accept。
+  //     只信它 → 自动模式取到比实际可达更低的值（静默低画质）。
+  // 并集则两头都兜住：只要**轨道真实存在**，它就有资格成为目标档位。
+  const candidates = [...new Set([...accept.map(Number), ...trackQualities])]
+    .filter((q) => Number.isFinite(q) && q > 0)
+    .sort((a, b) => b - a);
 
-  if (quality && accept.length && !accept.includes(quality)) {
-    // 请求的档位不在名单里：优先降到「不超过它的最高档」；
-    // 若全都比它高（例如请求 16 但名单从 32 起），就升到最接近的一档。
+  let quality = Number(spec.quality) || Number(settings.defaultQuality) || 0;
+  // 自动（0）：取候选里的最高档。
+  //
+  // **关键**：Number(spec.quality) 不是 Number() 化摆设 —— settings 里 defaultQuality
+  // 经 storage 持久化再读回时是**字符串**（"0" 而不是 0），而 JS 里 `!"0" === false`
+  // （非空字符串是 truthy）。如果用 `spec.quality || settings.defaultQuality` 兜底，
+  // 字符串 "0" 会被当 truthy 跳过自动分支，导致降级到最低档（360P）。
+  // 数值归一化在 settings.loadSettings 里已经做过，但这里再防御一次（也防
+  // settings 来自测试 / 直接调用 / 旧版本扩展未升级），双保险。
+  //
+  // 用 Math.max 而不是 accept[0]：实测 4 个不同视频的 accept_quality 都是降序
+  // （[116,80,64,32,16] / [32,16] / [112,80,64,32,16] / [16]），但这**不是接口契约**，
+  // 一旦顺序变了 accept[0] 就可能取到最低档 —— 那正是 360P 事故的形态。
+  if (!quality) {
+    quality = candidates[0] || playInfo.videos[0]?.quality || 0;
+  }
+
+  if (quality && candidates.length && !candidates.includes(quality)) {
+    // 请求的档位不可得：优先降到「不超过它的最高档」；
+    // 若全都比它高（例如请求 16 但最低档是 32），就升到最接近的一档。
     // ★ 原来是 `accept[accept.length - 1]`（名单末位 = 最低档），
     //   会把用户的高清请求**静默变成 360P** —— 这正是"怎么自动下了 360P"的来源。
-    const lower = accept.filter((q) => q <= quality).sort((a, b) => b - a)[0];
-    const higher = accept.filter((q) => q > quality).sort((a, b) => a - b)[0];
+    const lower = candidates.filter((q) => q <= quality).sort((a, b) => b - a)[0];
+    const higher = candidates.filter((q) => q > quality).sort((a, b) => a - b)[0];
     const fallback = lower || higher || maxTrack || quality;
     if (fallback !== quality) {
       warn('请求的清晰度不可用，已就近调整', `请求 ${quality} → 实际 ${fallback}`);

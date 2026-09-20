@@ -157,4 +157,66 @@ chrome.runtime.onStartup?.addListener(() => {
       chrome.declarativeNetRequest.updateEnabledRulesets({ enableRulesetIds: ['bdown_referer'] });
     }
   });
+  ensureStrictOriginRule();
+});
+
+/**
+ * 注册一条**只对自己扩展生效**的 Origin 改写规则（动态规则，priority 10）。
+ *
+ * 为什么需要它：
+ * 静态规则 3 的条件是 `api.bilibili.com` + `excludedInitiatorDomains: ["bilibili.com"]`。
+ * 那是"**排除**主站页面"，而不是"**限定**只对扩展生效" —— 于是任何**第三方页面**
+ * （evil.com 之类）发往 api.bilibili.com 的请求，Origin 也会被改写成
+ * `https://www.bilibili.com`。虽然 B 站的操作类接口另有 `bili_jct` CSRF token 兜底
+ * （跨源读不到，攻击实际难以成立），但**扩大攻击面本身就不该做**。
+ *
+ * 静态 JSON 里写不了扩展 ID（打包时未知），所以用动态规则在运行时取
+ * `chrome.runtime.id`。它的 host 恰好就是扩展 ID，与 `initiatorDomains` 的
+ * 域名匹配逻辑一致（Chromium `DoesHostMatchDomainLists(origin.host(), ...)`）。
+ *
+ * 与静态规则 3 的关系：两者都命中扩展自身请求、动作相同，priority 10 的这条胜出；
+ * 静态规则 3 保留作为**兜底**（万一动态规则注册失败，扩展仍能绕开 WAF 412）。
+ * 对第三方页面，这条不匹配（initiator 不是扩展 ID），攻击面被收窄到只剩
+ * 静态规则 3 那一层。
+ *
+ * 失败不致命：catch 掉即可，扩展功能不受影响。
+ */
+const STRICT_ORIGIN_RULE_ID = 1001;
+async function ensureStrictOriginRule() {
+  try {
+    const extId = chrome.runtime.id;
+    if (!extId) return;
+    const rule = {
+      id: STRICT_ORIGIN_RULE_ID,
+      priority: 10,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders: [
+          { header: 'Origin', operation: 'set', value: 'https://www.bilibili.com' },
+          // Referer 也必须由 DNR 补：它是 Fetch 规范里的 forbidden header name，
+          // 在 fetch() 的 headers 里设置会被浏览器**静默丢弃**（不报错、不生效）。
+          // api.js 的 COMMON_HEADERS 里写了 Referer 但实际从未送达 —— 只有 DNR 能改。
+          { header: 'Referer', operation: 'set', value: 'https://www.bilibili.com/' },
+        ],
+      },
+      condition: {
+        regexFilter: '^https?://api\\.bilibili\\.com/',
+        resourceTypes: ['xmlhttprequest'],
+        initiatorDomains: [extId],
+      },
+    };
+    // 幂等：先删旧的同 id 规则再添加（updateDynamicRules 对已存在的 id 会报错）
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [STRICT_ORIGIN_RULE_ID],
+      addRules: [rule],
+    });
+  } catch (err) {
+    // 动态规则注册失败不影响扩展主流程（静态规则 3 仍在兜底）
+    console.warn('[Bdown] 严格 Origin 规则注册失败（不影响功能，静态规则仍在兜底）', err?.message);
+  }
+}
+
+// 安装 / 更新时也注册一次
+chrome.runtime.onInstalled.addListener(() => {
+  ensureStrictOriginRule();
 });

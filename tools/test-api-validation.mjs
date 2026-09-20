@@ -222,18 +222,28 @@ async function main() {
   }
 
 
-  // 场景 11：playurl 自动 qn 按账号状态挑选（不强制 127）
+  // 场景 11：playurl 自动 qn 始终传 127，让服务端按账号权限返回它能给的全部轨道。
+  //   v1.4.20 变更：旧实现按账号兜底成 vip=127/登录80/未登录64，nav 偶发失败时
+  //   logged=null → 落到 64 → 客户端主动给自己设了 720P 上限，已登录用户也下不到
+  //   1080P。实测未登录态下 qn=16/64/80/127 返回的 dash.video 集合完全一致，
+  //   说明兜底成 64 纯属自我设限。现统一传 127（最大值），清晰度由 pickVideoTrack
+  //   从 dash.video[] 里挑最高（见 test-quality-pick.mjs [6]）。
   {
-    for (const [label, account, expectedQn] of [
-      ['已登录非会员', { isLogin: true, vip: false }, 80],
-      ['大会员',      { isLogin: true, vip: true  }, 127],
-      ['未登录',      null,                              64],
+    for (const [label, account] of [
+      ['已登录非会员', { isLogin: true, vip: false }],
+      ['大会员',      { isLogin: true, vip: true  }],
+      ['未登录',      null],
+      ['nav 抖动（account=null）', null],
     ]) {
       const captured = [];
       const api = new BiliApi({
         fetchImpl: async (url) => {
           captured.push(String(url));
           if (/web-interface\/nav/.test(url)) {
+            if (label === 'nav 抖动（account=null）') {
+              // WAF HTML → 走 nav 错误路径 → ensureAccount 返回 null
+              return new Response('<html>出错啦</html>', { status: 412, headers: { 'Content-Type': 'text/html' } });
+            }
             return new Response(JSON.stringify({
               code: 0,
               data: {
@@ -253,8 +263,10 @@ async function main() {
       const playurlUrl = captured.find((u) => /playurl/.test(u)) || '';
       const m = playurlUrl.match(/qn=(\d+)/);
       const got = m ? Number(m[1]) : -1;
-      ok('账号=' + label + ' → qn=' + expectedQn + '（不让非会员被降级到 360P 预览）',
-        got === expectedQn, 'got qn=' + got + ' in ' + (m && m[0]));
+      ok('账号=' + label + ' → qn=127（不自我设限，旧 64/80 兜底已废弃）',
+        got === 127, 'got qn=' + got + ' in ' + (m && m[0]));
+      ok('账号=' + label + ' → 不带 try_look（不强制走试看流）',
+        !/try_look=/.test(playurlUrl), playurlUrl || '(no playurl)');
     }
   }
 

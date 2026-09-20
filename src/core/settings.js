@@ -67,10 +67,27 @@ export const DEFAULT_SETTINGS = {
 
 const KEYS = Object.keys(DEFAULT_SETTINGS);
 
+/** DEFAULT_SETTINGS 里类型是 number 的字段名（用于读取时做归一化）。 */
+const NUMERIC_KEYS = KEYS.filter((k) => typeof DEFAULT_SETTINGS[k] === 'number');
+
 /** 读取全部设置（合并默认值）。 */
 export async function loadSettings() {
   const stored = await chrome.storage.local.get(KEYS);
-  return { ...DEFAULT_SETTINGS, ...stored };
+  const merged = { ...DEFAULT_SETTINGS, ...stored };
+  // 归一化数值字段：chrome.storage 不改类型，但 options/popup 的
+  // select / input 直接 .value 时是**字符串**，写盘后再读回仍是字符串。
+  // 这对大多数字段无害，但对清晰度相关字段（如 defaultQuality）极危险：
+  //   - JS 里 `!"0" === false`（非空字符串是 truthy）
+  //   - 所以 `if (!quality)` 不会把字符串 "0" 识别为"自动"
+  //   - 直接走到降级分支，accept 最小档（360P）就成了默认结果
+  // 统一 Number()，让所有下游逻辑（buildPlan 等）拿到的都是数字。
+  for (const k of NUMERIC_KEYS) {
+    if (merged[k] !== undefined && merged[k] !== null && merged[k] !== '') {
+      const n = Number(merged[k]);
+      if (Number.isFinite(n)) merged[k] = n;
+    }
+  }
+  return merged;
 }
 
 /** 写入部分设置。 */

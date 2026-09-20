@@ -72,8 +72,6 @@ console.log('\n[4] 课程（pugv）的 fnval 与 yt-dlp 对齐');
   ok('课程不再沿用 ugc 的 4048（含未经验证的 HDR/4K/杜比/8K 位）', FNVAL_PUGV !== FNVAL_DASH);
 }
 
-console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 清晰度挑选测试${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);
-
 console.log('\n[5] buildPlan 的清晰度降级不能静默掉到最低档（360P 事故）');
 {
   const { buildPlan } = await import('../src/core/engine.js');
@@ -97,6 +95,148 @@ console.log('\n[5] buildPlan 的清晰度降级不能静默掉到最低档（360
 
   const fake = plan({ acceptQuality: [125, 116, 80, 64, 32, 16], videos: mk([32, 16]) }, { quality: 0 });
   ok('宣称 125 但实际只有 32/16 -> 取 32（不虚报）', fake.video?.quality === 32, 'track=' + fake.video?.quality);
+}
+
+console.log('\n[6] settings.defaultQuality 是字符串 "0" 时仍能走自动（360P 事故的根因）');
+{
+  const { buildPlan } = await import('../src/core/engine.js');
+  const mk = (qs) => qs.map((q) => ({
+    quality: q, id: q, codecid: 7, bandwidth: 1000 + q, url: 'https://cdn/v', backupUrls: [], size: 1000,
+  }));
+  const audio = [{ quality: 30280, id: 30280, codecid: 0, url: 'https://cdn/a', backupUrls: [], size: 100 }];
+  const SET_BASE = { downloadMode: 'merge', preferCodec: 'avc', audioPreference: 'normal' };
+  const plan = (pi, spec, set) => buildPlan({ mode: 'dash', videos: [], audios: audio, ...pi }, { ...SET_BASE, ...(set || {}) }, spec);
+
+  // 复刻事故现场：用户选"自动"，但 storage 里 defaultQuality 是**字符串 "0"**
+  // （options.js 老版本 patch[key] = el.value 不转 number）。
+  // JS 里 !"0" === false（字符串是 truthy），所以旧的 `spec.quality || settings.defaultQuality`
+  // 会把字符串 "0" 当作 truthy，跳过自动分支，走降级 → accept 最小档 = 16 → 360P。
+  const stringy = plan(
+    { acceptQuality: [116, 80, 64, 32, 16], videos: mk([80, 64, 32, 16]) },
+    { quality: 0 },
+    { defaultQuality: '0' },  // 字符串 "0" —— 关键！
+  );
+  ok('settings.defaultQuality="0"（字符串）+ spec.quality=0 → 仍走自动选 80',
+    stringy.video?.quality === 80,
+    `track=${stringy.video?.quality}（期待 80；如果这是 16，就是 360P 事故）`);
+  ok('settings.defaultQuality="0"（字符串）不应被误判为请求 0',
+    stringy.video?.quality !== 16 && stringy.video?.quality !== 32,
+    `track=${stringy.video?.quality}`);
+
+  // 同时验证数字 0 也照常工作（不回归）
+  const numeric = plan(
+    { acceptQuality: [116, 80, 64, 32, 16], videos: mk([80, 64, 32, 16]) },
+    { quality: 0 },
+    { defaultQuality: 0 },
+  );
+  ok('settings.defaultQuality=0（数字）+ spec.quality=0 → 选 80',
+    numeric.video?.quality === 80, `track=${numeric.video?.quality}`);
+}
+
+console.log('\n[7] accept_quality 顺序不可信：不能靠 accept[0] 取最高档');
+{
+  const { buildPlan } = await import('../src/core/engine.js');
+  const mk = (qs) => qs.map((q) => ({
+    quality: q, id: q, codecid: 7, bandwidth: 1000 + q, url: 'https://cdn/v', backupUrls: [], size: 1000,
+  }));
+  const audio = [{ quality: 30280, id: 30280, codecid: 0, url: 'https://cdn/a', backupUrls: [], size: 100 }];
+  const SET = { downloadMode: 'merge', preferCodec: 'avc', audioPreference: 'normal' };
+  const plan = (pi, spec) => buildPlan({ mode: 'dash', videos: [], audios: audio, ...pi }, SET, spec);
+
+  // 实测 4 个视频的 accept_quality 都是降序（[116,80,64,32,16] 等），但这不是接口契约。
+  // 若某天变成升序，旧实现 accept[0] 会取到**最低档** → 又是 360P。
+  const asc = plan({ acceptQuality: [16, 32, 64, 80], videos: mk([80, 64, 32, 16]) }, { quality: 0 });
+  ok('accept_quality 升序 [16,32,64,80] + 自动 → 仍取最高档 80（不能取 accept[0]=16）',
+    asc.video?.quality === 80, `track=${asc.video?.quality}`);
+
+  const shuffled = plan({ acceptQuality: [64, 16, 80, 32], videos: mk([80, 64, 32, 16]) }, { quality: 0 });
+  ok('accept_quality 乱序 [64,16,80,32] + 自动 → 仍取最高档 80',
+    shuffled.video?.quality === 80, `track=${shuffled.video?.quality}`);
+
+  // 边界：accept 为空数组时必须回退到实际轨道最高档（不能因 Math.max() 得 -Infinity）
+  const emptyAccept = plan({ acceptQuality: [], videos: mk([80, 64, 32, 16]) }, { quality: 0 });
+  ok('accept_quality 为空 + 自动 → 回退实际最高档 80（Math.max 空数组边界）',
+    emptyAccept.video?.quality === 80, `track=${emptyAccept.video?.quality}`);
+}
+
+console.log('\n[8] ★ pickExactTrack：UI 可用性判定必须精确匹配（"弹窗显示 1080P、下到 360P"的成因）');
+{
+  const { pickExactTrack, pickVideoTrack: pick } = await import('../src/core/api.js');
+  const mk = (qs) => qs.map((q, i) => ({ quality: q, id: q, codecid: 7, bandwidth: 1000 + i }));
+
+  // 复刻真实响应：accept_quality 宣称 [116,80,64,32,16]，dash.video 只有 [32,32,16,16]
+  const tracks = mk([32, 32, 16, 16]);
+
+  ok('pickExactTrack(116) === null（1080P60 并不存在，不能被标成"可用"）',
+    pickExactTrack(tracks, 116, 'avc') === null, JSON.stringify(pickExactTrack(tracks, 116, 'avc')));
+  ok('pickExactTrack(80) === null（1080P 并不存在）',
+    pickExactTrack(tracks, 80, 'avc') === null);
+  ok('pickExactTrack(64) === null（720P 并不存在）',
+    pickExactTrack(tracks, 64, 'avc') === null);
+  ok('pickExactTrack(32) 返回 480P 轨道',
+    pickExactTrack(tracks, 32, 'avc')?.quality === 32);
+  ok('pickExactTrack(16) 返回 360P 轨道',
+    pickExactTrack(tracks, 16, 'avc')?.quality === 16);
+
+  // 反证：这正是旧实现踩的坑 —— pickVideoTrack 对 116 会回退到 32 并返回非空
+  ok('反证：pickVideoTrack(116) 会回退返回 32（非空 → 旧实现据此误判"116 可用"）',
+    pick(tracks, 116, 'avc')?.quality === 32,
+    '若这里变成 null，说明 pickVideoTrack 语义被改了，本测试的前提失效');
+
+  // 同档多编码时按编码偏好挑
+  const multi = [
+    { quality: 80, id: 80, codecid: 12, bandwidth: 100 },
+    { quality: 80, id: 80, codecid: 7, bandwidth: 100 },
+  ];
+  ok('同档多编码 → pickExactTrack 按 preferCodec 挑（avc → codecid 7）',
+    pickExactTrack(multi, 80, 'avc')?.codecid === 7);
+  ok('同档多编码 → preferCodec=hevc → codecid 12',
+    pickExactTrack(multi, 80, 'hevc')?.codecid === 12);
+
+  // 边界
+  ok('空轨道列表 → null', pickExactTrack([], 80, 'avc') === null);
+  ok('quality 非数字 → null', pickExactTrack(tracks, undefined, 'avc') === null);
+}
+
+console.log('\n[9] pickVideoTrack 无可用档时取"最接近的高档"，不是全表最高');
+{
+  const { pickVideoTrack: pick } = await import('../src/core/api.js');
+  const mk = (qs) => qs.map((q, i) => ({ quality: q, id: q, codecid: 7, bandwidth: 1000 + i }));
+
+  // 用户明确选 360P，但该视频最低只有 720P/1080P
+  const v = mk([80, 64]);
+  ok('请求 16 但只有 [80,64] → 取最接近的 64，而不是最高的 80',
+    pick(v, 16, 'avc')?.quality === 64, `得到 ${pick(v, 16, 'avc')?.quality}`);
+
+  const v2 = mk([80, 64, 32]);
+  ok('请求 16 但只有 [80,64,32] → 取最接近的 32',
+    pick(v2, 16, 'avc')?.quality === 32, `得到 ${pick(v2, 16, 'avc')?.quality}`);
+}
+
+console.log('\n[10] buildPlan 的候选档位 = accept ∪ 实际轨道（防虚报 / 防漏报）');
+{
+  const { buildPlan } = await import('../src/core/engine.js');
+  const mk = (qs) => qs.map((q) => ({
+    quality: q, id: q, codecid: 7, bandwidth: 1000 + q, url: 'https://cdn/v', backupUrls: [], size: 1000,
+  }));
+  const audio = [{ quality: 30280, id: 30280, codecid: 0, url: 'https://cdn/a', backupUrls: [], size: 100 }];
+  const SET = { downloadMode: 'merge', preferCodec: 'avc', audioPreference: 'normal' };
+  const plan = (pi, spec) => buildPlan({ mode: 'dash', videos: [], audios: audio, ...pi }, SET, spec);
+
+  // 防"漏报"：accept 说只有 16，但轨道里明明有 80 → 自动应取 80
+  const under = plan({ acceptQuality: [16], videos: mk([80, 64, 16]) }, { quality: 0 });
+  ok('accept 漏报（只列 16）但轨道有 80 → 自动取 80（并集生效）',
+    under.video?.quality === 80, `track=${under.video?.quality}`);
+
+  // 防"虚报"：accept 说 116，轨道最大只有 32 → 自动的目标档是 116，但实际落到 32
+  const over = plan({ acceptQuality: [116, 80, 64, 32, 16], videos: mk([32, 16]) }, { quality: 0 });
+  ok('accept 虚报（列 116）但轨道最大 32 → 实际落到 32（不虚报）',
+    over.video?.quality === 32, `track=${over.video?.quality}`);
+
+  // 用户明确选 720P 且确实存在 → 精确使用
+  const exact = plan({ acceptQuality: [116, 80, 64], videos: mk([80, 64]) }, { quality: 64 });
+  ok('明确选 720P(64) 且存在 → 精确用 64（不升到 80）',
+    exact.video?.quality === 64, `track=${exact.video?.quality}`);
 }
 
 console.log('\n' + (fail === 0 ? '✅ 清晰度挑选测试完成，失败 0 项' : '❌ 清晰度挑选测试完成，失败 ' + fail + ' 项') + '（通过 ' + pass + '）' + '\n');

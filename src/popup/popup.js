@@ -2,7 +2,7 @@
  * 弹窗：解析当前视频 → 选清晰度 / 选集 → 交给下载中心执行。
  */
 
-import { BiliApi, pickVideoTrack, pickAudioTrack } from '../core/api.js';
+import { BiliApi, pickVideoTrack, pickAudioTrack, pickExactTrack } from '../core/api.js';
 import { QUALITIES, qualityShort } from '../core/quality.js';
 import { loadSettings, saveSettings } from '../core/settings.js';
 import { extractVideoId, formatBytes, formatDuration, parseRangeExpr, sanitizeFilename, applyTemplate, formatNumber, escapeHtml, warn } from '../core/util.js';
@@ -58,6 +58,22 @@ async function refreshLoginBadge() {
  * 解析
  * ------------------------------------------------------------------ */
 
+/**
+ * 进入一个**新视频**时清掉上一个视频的选择残留。
+ *
+ * 为什么需要：`selectedQuality` / `selectedPages` 是模块级状态，弹窗不关闭时
+ * （例如用户用「粘贴链接」连续解析两个视频）会带着上一个视频的值。
+ * 后果：上一个视频选了 360P，下一个视频（有 1080P）会**静默沿用 360P** ——
+ * 用户以为"自动选了最高"，实际下的还是 360P。
+ *
+ * 只在 parseTab / parseManual（新视频入口）调用；**不在 loadVideo 里调** ——
+ * 那是 btnRetry 也会走的路径，重试同一个视频时不该丢掉用户的分P勾选。
+ */
+function resetSelection() {
+  selectedQuality = 0;
+  selectedPages = new Set();
+}
+
 async function parseTab() {
   showState('loading');
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -65,6 +81,7 @@ async function parseTab() {
   if (fromUrl) {
     const p = Number(new URL(tab.url).searchParams.get('p')) || 1;
     currentSpec = { ...fromUrl, pageIndex: p - 1 };
+    resetSelection();
     await loadVideo();
     return;
   }
@@ -80,6 +97,7 @@ async function parseManual(text) {
     return;
   }
   currentSpec = { ...id, pageIndex: 0 };
+  resetSelection();
   showState('loading');
   await loadVideo();
 }
@@ -156,42 +174,59 @@ function buildQualityOptions() {
   const accept = new Set(playInfo.acceptQuality || []);
   const bestAudio = pickAudioTrack(playInfo.audios, { preferLossless: settings.audioPreference !== 'normal' });
 
+  /**
+   * 取**恰好等于** q 档的轨道（同档多编码时按编码偏好挑一条）。
+   *
+   * ★ 这里绝不能退化成 `pickVideoTrack(videos, q)` —— 它的语义是"不超过 q 的
+   * 最高档"，在缺少高画质轨道时会**回退到低档并返回一条非空轨道**，于是
+   * `!!video` 恒为真，UI 会把 1080P60 标成"可用"而实际只有 480P。
+   * 这正是「弹窗显示 1080P、下到 360P」的直接成因（v1.4.20 修复）。
+   *
+   * 实现放在 api.js 的 `pickExactTrack`，与 `pickVideoTrack` 同源，
+   * 这样 tools/test-quality-pick.mjs 能直接对**生产代码**做断言，而不是抄一份逻辑。
+   */
+  const exactTrack = (q) => pickExactTrack(playInfo.videos, q, settings.preferCodec);
+
+  /** 构造一个选项对象。available 以「该档位真实存在轨道」为唯一依据。 */
+  const makeOption = (q, extra = {}) => {
+    const video = exactTrack(q);
+    return {
+      quality: q,
+      label: extra.label || QUALITIES[q]?.label || `清晰度 ${q}`,
+      short: qualityShort(q),
+      size: video ? (video.size || 0) + (bestAudio?.size || 0) : 0,
+      // ★ 只认"精确存在"。accept_quality 会虚报（实测未登录时宣称
+      // [116,80,64,32,16] 而 dash.video 只有 [32,16]），不能作为可用性依据。
+      available: !!video,
+      needVip: extra.needVip ?? !!QUALITIES[q]?.vip,
+      needLogin: extra.needLogin ?? !!QUALITIES[q]?.login,
+      codec: video?.codec || '',
+    };
+  };
+
   const list = [];
   // 先放 B 站声明支持的清晰度（含未解锁的，用于提示需要大会员/登录）
-  const declared = [...formats.keys()].sort((a, b) => b - a);
-  for (const q of declared) {
+  for (const q of [...formats.keys()].sort((a, b) => b - a)) {
     const f = formats.get(q);
-    const available = accept.has(q);
-    const video = pickVideoTrack(playInfo.videos, q, settings.preferCodec);
-    const size = (video?.size || 0) + (bestAudio?.size || 0);
-    list.push({
-      quality: q,
-      label: QUALITIES[q]?.label || f.new_description || f.display_desc || `清晰度 ${q}`,
-      short: qualityShort(q),
-      size: video ? size : 0,
-      available: available && !!video,
+    list.push(makeOption(q, {
+      label: QUALITIES[q]?.label || f.new_description || f.display_desc,
       needVip: !!f.need_vip || !!QUALITIES[q]?.vip,
       needLogin: !!f.need_login || !!QUALITIES[q]?.login,
-      codec: video?.codec || '',
-    });
+    }));
   }
   // 补上接口返回但 support_formats 里没有的
-  for (const q of accept) {
-    if (!list.some((x) => x.quality === q)) {
-      const video = pickVideoTrack(playInfo.videos, q, settings.preferCodec);
-      list.push({
-        quality: q,
-        label: QUALITIES[q]?.label || `清晰度 ${q}`,
-        short: qualityShort(q),
-        size: (video?.size || 0) + (bestAudio?.size || 0),
-        available: !!video,
-        needVip: !!QUALITIES[q]?.vip,
-        needLogin: !!QUALITIES[q]?.login,
-        codec: video?.codec || '',
-      });
-    }
-  }
-  return list;
+  //
+  // 注意：这里**必须排序**。若 support_formats 为空（部分 pgc/pugv 响应会缺），
+  // 整个列表就只剩这一轮的结果，而 `accept` 是 Set、迭代顺序 = 原始 accept_quality
+  // 顺序。虽然实测 4 个视频的 accept_quality 都是降序，但这不是接口契约 ——
+  // 一旦顺序变了，render() 里 `options.find(o => o.available)` 就会取到**非最高档**，
+  // 表现正是"自动却下到低画质"。
+  const extra = [...accept].filter((q) => !list.some((x) => x.quality === q)).sort((a, b) => b - a);
+  for (const q of extra) list.push(makeOption(q));
+
+  // 最终按清晰度降序，保证：① 展示顺序稳定 ② `options.find(o => o.available)`
+  // 取到的就是**最高可用档**（"自动"语义的落点）
+  return list.sort((a, b) => b.quality - a.quality);
 }
 
 function render() {
@@ -205,9 +240,21 @@ function render() {
 
   // 清晰度
   const options = buildQualityOptions();
-  selectedQuality = selectedQuality || options.find((o) => o.available)?.quality || options[0]?.quality || 0;
+  const highestAvailable = options.find((o) => o.available)?.quality || 0;
+  if (!selectedQuality) {
+    // 用户还没在本弹窗里点过 → 按设置页的「默认清晰度」决定初值。
+    //
+    // ★ 旧实现直接取 `options.find(o => o.available)`（= 最高可用档），
+    //   完全**无视** settings.defaultQuality —— 用户在设置页选了 720P，
+    //   弹窗照样按 1080P 下。现在设置真正生效：
+    //   设了具体档且该档可用 → 用它；否则（含"自动"=0）→ 最高可用档。
+    const pref = Number(settings.defaultQuality) || 0;
+    const prefOpt = pref > 0 ? options.find((o) => o.quality === pref && o.available) : null;
+    selectedQuality = prefOpt?.quality || highestAvailable || options[0]?.quality || 0;
+  }
+  // 兜底：选中的档位在本次响应里不可用（换视频 / 该档未解锁）→ 回落到最高可用档。
   if (!options.some((o) => o.quality === selectedQuality && o.available)) {
-    selectedQuality = options.find((o) => o.available)?.quality || options[0]?.quality || 0;
+    selectedQuality = highestAvailable || options[0]?.quality || 0;
   }
   const listEl = $('qualityList');
   listEl.innerHTML = '';
@@ -417,12 +464,17 @@ function updateSummary() {
 async function startDownload() {
   const specs = collectSpecs();
   if (!specs.length) return;
+  // 注意：**不要**在这里写 defaultQuality。
+  //
+  // 旧实现写了 `defaultQuality: 0`，等于每次点「开始下载」都把用户在设置页
+  // 选的默认清晰度**静默重置成"自动"**。用户改了设置、下次打开设置页又变回自动，
+  // 会以为设置没保存。本次下载的清晰度已经通过 specs[].quality 显式传递，
+  // 不需要也不应该回头改全局默认值。
   await saveSettings({
     downloadMode: document.querySelector('input[name="mode"]:checked')?.value || settings.downloadMode,
     saveDanmaku: $('optDanmaku').checked,
     saveSubtitle: $('optSubtitle').checked,
     saveCover: $('optCover').checked,
-    defaultQuality: 0,
   });
   const res = await chrome.runtime.sendMessage({
     type: 'OPEN_DASHBOARD',

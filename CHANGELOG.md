@@ -1,3 +1,309 @@
+## [1.4.21] - 2026-09-20
+
+> 对 v1.4.20 做了一轮**对抗性复审**（独立 Agent 攻击 + 自查），又挖出 1 个 P0、4 个 P1、
+> 2 个回归风险和 1 个潜伏 bug。**v1.4.20 的修复都是真的，但没修完。**
+
+### 🔴 P0：弹窗把"不可用的档位"标成可用 —— 这才是「显示 1080P、下到 360P」的直接成因
+
+`popup.js` 的 `buildQualityOptions()` 用 `pickVideoTrack(videos, q)` 判断"这一档能不能下"：
+
+```js
+const video = pickVideoTrack(playInfo.videos, q, settings.preferCodec);
+available: accept.has(q) && !!video,   // ← 恒为 true
+```
+
+但 `pickVideoTrack` 的语义是"**不超过** q 的最高档" —— 没有 1080P 轨道时它会**回退到
+480P 并返回一条非空轨道**，于是 `!!video` 恒为真。
+
+**实测复现**（用真实响应：`accept_quality=[116,80,64,32,16]`，`dash.video` 实际只有 `[32,32,16,16]`）：
+
+| 档位 | UI 标为可用？ | 实际会下到的轨道 |
+|---|---|---|
+| 116 (1080P60) | **✓ 可用** | 32 (480P) |
+| 80 (1080P) | **✓ 可用** | 32 (480P) |
+| 64 (720P) | **✓ 可用** | 32 (480P) |
+| 32 (480P) | ✓ 可用 | 32 |
+| 16 (360P) | ✓ 可用 | 16 |
+
+`render()` 随后 `options.find(o => o.available)` 取到**最高档 116** 作为默认选中 →
+弹窗显示"1080P60"，文件却是 480P/360P。**用户看到的正是"明明选了高清，下来是 360P"。**
+
+**修复**：新增 `pickExactTrack(videos, q, preferCodec)`（`src/core/api.js`），
+语义是"**必须**是 q 档，否则返回 `null`"。popup 的可用性判定改用它，
+`available` 以"该档位真实存在轨道"为唯一依据（不再信 `accept_quality` —— 它会虚报）。
+
+放在 `api.js` 而非 popup 内部，是为了让测试能对**生产代码**断言，而不是抄一份逻辑
+（本项目历史上吃过"测试抄实现 = 循环论证"的亏）。
+
+### P1：`pickVideoTrack` 在无可用档时取"全表最高"，把用户的低画质选择变成高画质
+
+```js
+const eligible = videos.filter((v) => qOf(v) <= maxQ);
+const pool = eligible.length ? eligible : videos;   // ← 空时取全部
+```
+
+用户明确选 360P、但该视频最低只有 720P 时，`eligible` 为空 → `pool = videos`
+→ 返回**全部轨道里的最高档**。用户要 360P 却下 1080P，既费流量又违背选择。
+
+**修复**：空时取**最接近的一档**（略高于请求值的最小档），语义等同"就近上调"。
+
+### P1：`buildPlan` 只信 `accept_quality`，既会被虚报带偏、也会被漏报压低
+
+`accept_quality` 实测会**虚报**（未登录时宣称 `[116,80,64,32,16]` 而实际只有 `[32,16]`），
+也可能**漏报**（有轨道却没列进去）。只信它，自动模式就会取到比实际可达更低的值。
+
+**修复**：候选档位改为 **`accept_quality` ∪ 实际轨道档位** 的并集 ——
+只要轨道真实存在，它就有资格成为目标档位。
+
+### P1：弹窗切换视频时残留上一个视频的选择
+
+`selectedQuality` / `selectedPages` 是模块级状态。用户用「粘贴链接」连续解析两个视频时，
+上一个视频选的 360P 会被**静默沿用**到下一个（有 1080P 的）视频上。
+
+**修复**：新增 `resetSelection()`，在 `parseTab` / `parseManual`（新视频入口）调用；
+**不在 `loadVideo` 里调** —— 那是「重试」也走的路径，重试同一视频不该丢掉分P勾选。
+
+### P2：设置页的「默认清晰度」在弹窗路径上从未生效
+
+`render()` 直接取 `options.find(o => o.available)`（最高可用档），**完全无视**
+`settings.defaultQuality`。用户设了 720P，弹窗照样按最高档下。
+
+**修复**：未手动选择时，先看 `settings.defaultQuality` —— 设了具体档且该档可用就用它，
+否则（含"自动"=0）才用最高可用档。
+
+### 🔧 回归修复：规则 4 误覆盖通用 CDN `akamaized.net`
+
+v1.4.20 把规则 4 的匹配域从 `bilibili.com` 系改到 CDN 列表时，我照抄了规则 1 的域名集合，
+其中 **`akamaized.net` 是通用 CDN**（大量无关站点在用），并非 B 站专属。
+对它 `Origin: remove` 会破坏**第三方页面**依赖 Origin 的 CORS 校验（服务端需 Origin 才回显 ACAO）。
+规则 4 原本并不覆盖它 —— 这是我引入的扩大化。
+
+**修复**：规则 4 收窄为 **B 站专属 CDN**（`bilivideo.com` / `bilivideo.cn` / `hdslb.com` / `biliapi.net`）。
+规则 1 保留 `akamaized.net`（它只改 Referer/UA、不碰 Origin，且 B 站下载确实需要）。
+
+### 🔧 加固：新增「只对自己扩展生效」的动态 Origin 规则，收窄 CSRF 面
+
+静态规则 3 的条件是"`api.bilibili.com` + `excludedInitiatorDomains: ["bilibili.com"]`"。
+注意这是"**排除**主站页面"，**不是**"**限定**只对扩展生效" ——
+于是任何第三方页面（evil.com）发往 `api.bilibili.com` 的请求，Origin 也会被改写成
+`https://www.bilibili.com`。虽然 B 站操作类接口另有 `bili_jct` CSRF token 兜底
+（跨源读不到，攻击实际难以成立），但**扩大攻击面本身就不该做**。
+
+**修复**：在 service worker 里注册**动态规则**（id 1001，priority 10），
+用 `chrome.runtime.id` 作为 `initiatorDomains` —— 静态 JSON 里写不了扩展 ID（打包时未知），
+运行时才有。扩展自身请求命中它（更严格）；静态规则 3 保留作为**兜底**（动态规则注册失败时
+扩展仍能绕开 WAF 412）。注册失败被 catch，不影响主流程。
+
+### 🐛 潜伏 bug：`util.js` 里含一个真实 NUL 字节
+
+`src/core/util.js` 第 206 行的注释是**警告**"写 `\u0000` 这类转义会被工具链解释成真正的
+控制字符" —— 而它自己就含一个被解释出来的真实 NUL 字节。文件因此被 grep 判定为
+`Binary file`，破坏 diff / 代码审查 / 部分工具链。
+
+**修复**：移除该字节；新增 `tools/lint-control-chars.mjs` 扫描全部源码，
+禁止 tab/LF/CR 之外的 C0 控制字符（已用"注入 NUL 必须报错"验证该检查非空洞）。
+
+### 🐛 潜伏 bug：课程链接被当成番剧，pugv 链路从 UI 根本走不到
+
+`extractVideoId()` 没有 `/cheese/` 分支，于是
+`https://www.bilibili.com/cheese/play/ep123456` 被通用 `/ep(\d+)` 抢先匹配成
+`{epId: 123456}` → `playurl` 走 pgc 分支、打到 `/pgc/player/web/v2/playurl`（错误端点）→ 任务必失败。
+
+而代码库的 pugv 支持（`FNVAL_PUGV` / `cheeseSeason` / engine 透传 `cheeseId`）一直是完整的 ——
+**唯独入口解析这一环缺失**。已补上 `/cheese/play/ep` 与 `/cheese/play/ss` 分支，
+并**放在通用 `/ep`、`/ss` 之前**（顺序是关键）。
+
+`extractVideoId` 此前**零测试覆盖**，尽管它是每一次下载的入口。新增
+`tools/test-extract-id.mjs`（29 项）覆盖 BV/av/aid/ep/ss/cheese/边界/脏链接。
+
+### 诊断日志增强
+
+`清晰度诊断` 增加 `isLogin` / `vip` / `uname`（扩展自己探测到的账号状态）。
+现在一行日志即可判定故障环：
+
+| 日志表现 | 结论 |
+|---|---|
+| `isLogin=false` | Cookie 未送达 / 未登录 |
+| `isLogin=true` 但 `dashVideos` 最大只有 16/32 | 服务端没按登录态给高画质 |
+| `isLogin=true` 且 `dashVideos` 含 80/112，`picked` 更低 | 客户端选轨 bug |
+| `accept_quality` 有 80 但 `dashVideos` 没有 | 账号权限不足或内容限制 |
+
+### 🐛 潜伏 bug：`api.bilibili.com` 的请求**从来没有带过 Referer**
+
+`src/core/api.js` 的 `COMMON_HEADERS` 里一直写着：
+
+```js
+Referer: 'https://www.bilibili.com/',
+Origin: 'https://www.bilibili.com',
+```
+
+注释还声称"显式设置桌面浏览器 UA、Origin、Referer"以通过来源校验。
+**但 `Referer` / `Origin` / `User-Agent` 都是 Fetch 规范里的 forbidden header name** ——
+在 `fetch()` 的 headers 里设置会被浏览器**静默丢弃**（不报错、不警告、不生效）。
+
+实测核对 DNR 规则覆盖面后发现：
+- `Origin` 有规则 3 兜底 ✅
+- `Referer` **没有任何规则覆盖**（规则 1/2 只管 CDN 域名，不管 `api.bilibili.com`）❌
+
+于是扩展对 API 的请求画像是 **"有 Origin 却无 Referer"** —— 而 B 站自己的页面调 API 时
+一定带 Referer。这是个异常指纹，理论上可能被风控识别。
+
+**修复**：规则 3（以及运行时动态严格规则）同时 `set` `Origin` 与 `Referer`。
+请求画像现在与 B 站自己页面一致。
+
+（顺带更正了 `api.js` 里那段误导性注释 —— 它让人以为来源校验已由 fetch 头解决，
+掩盖了 Referer 从未送达的事实。这个认知偏差正是"改了却没用"类问题的温床。）
+
+### 排查结论：**Cookie 未送达假设被实证否定**
+
+复审时提出的第 4 因假设是"扩展请求没带 SESSDATA cookie"。用无头 Edge + 最小 MV3 扩展
+**实测**后否定：
+
+| 场景 | cookie 携带情况 |
+|---|---|
+| **有** `host_permissions` | **全部 cookie 都带，含 `SameSite=Strict`** —— Chrome 对扩展请求打 `force_ignore_site_for_cookies` 标记（`net/cookies/cookie_util.cc`） |
+| **无** `host_permissions` | 只带 `SameSite=None`；`Sec-Fetch-Site: cross-site`、`Origin: chrome-extension://<id>`、CORS 被拦 |
+
+**决定因素是 `host_permissions`，不是 SameSite。** Bdown 已声明 `*://*.bilibili.com/*`，
+所以 cookie 一定带上了 —— 这条路排除。（Chrome 85 那次改动针对的是 content script 的 CORS，
+与 service worker 的 cookie 无关。）
+
+### 诊断日志增强
+
+`清晰度诊断` 增加 `isLogin` / `vip` / `uname`（扩展自己探测到的账号状态）。
+现在一行日志即可判定故障环：
+
+| 日志表现 | 结论 |
+|---|---|
+| `isLogin=false` | Cookie 未送达 / 未登录（按上面的实测，此路基本排除） |
+| `isLogin=true` 但 `dashVideos` 最大只有 16/32 | 服务端没按登录态给高画质 |
+| `isLogin=true` 且 `dashVideos` 含 80/112，`picked` 更低 | 客户端选轨 bug |
+| `accept_quality` 有 80 但 `dashVideos` 没有 | 账号权限不足或内容限制 |
+
+### 测试
+
+19 套件 / **504 项通过 / 0 失败**。新增 `test-extract-id.mjs`(29)、
+`lint-control-chars.mjs`；`test-dnr-side-effects.mjs` 增至 39 项；
+`test-quality-pick.mjs` 增至 39 项。所有新断言均已验证**非空洞**
+（模拟旧实现必须失败）。
+
+## [1.4.20] - 2026-09-20
+
+### 🔴 P0：扩展开启后**破坏 B 站主页面登录**（DNR 规则副作用）
+
+用户报告：只要扩展开着，B 站这些页面就登录不了 ——
+`message.bilibili.com`（消息）、`t.bilibili.com`（动态）、
+`space.bilibili.com/<uid>/favlist`（收藏夹）、
+`member.bilibili.com/platform/upload/video/frame`（创作中心）。
+
+**真因**：`rules/referer.json` 的规则 4（id=4）regexFilter 是
+`^https?://([^/?#]*\.)?(bilibili\.com|bilibili\.tv|b23\.tv)/` ——
+它**无差别命中所有 `*.bilibili.com` 子域**，包括 `passport.bilibili.com`
+（登录接口本身），然后把 `Origin` 头**删掉**。
+
+为什么删 Origin 会毁掉登录：浏览器扩展发起跨域请求时 `Origin` 由浏览器设为
+`chrome-extension://<id>`，这是 forbidden header，fetch 改不了，只能靠 DNR。
+但删掉 Origin 后，服务端回显的 `Access-Control-Allow-Origin` 无法与请求的
+**内部 origin** 匹配（CORS 校验比的是内部 origin，不是报文里的 Origin 头），
+于是跨域凭证请求被浏览器 CORS 拦截 —— 包括 `passport.bilibili.com` 的登录接口。
+
+**修复**：
+1. 规则 4 的匹配域从 `bilibili.com|bilibili.tv|b23.tv` **改为 CDN 域名**
+   （`bilivideo.com` / `bilivideo.cn` / `hdslb.com` / `biliapi.net` / `akamaized.net`）。
+   它本来就不该碰 `bilibili.com` —— 那里面全是页面和 API。
+2. 规则 3、4 都加 `excludedInitiatorDomains: ["bilibili.com"]`（Chrome 101+，
+   本扩展要求 116）。含义：来自 bilibili.com 任意子域的请求**不再被本规则匹配**，
+   只对扩展自身（service worker / dashboard 页面，initiator 是
+   `chrome-extension://<id>`）生效，用于绕开 WAF 的 412。子域会被自动覆盖。
+3. 规则 3、4 的 `resourceTypes` 从 `["xmlhttprequest","other"]` 收窄为
+   `["xmlhttprequest"]` —— `"other"` 覆盖面不可控，容易误伤。
+
+**旁证**：同类扩展 BiliDown 踩过完全一样的坑 —— v1.2.9 因 DNR 误拦直播 CDN
+导致直播页无法播放，v1.2.12 给规则加 `initiatorDomains` 后才恢复正常。
+
+新增测试 `tools/test-dnr-side-effects.mjs`（26 项），锁死：
+- 规则 4 **不得**命中任何 bilibili.com 系域名
+- 规则 3、4 必须有 `excludedInitiatorDomains: ["bilibili.com"]`
+- 动 Origin 的规则不得包含 `"other"` 资源类型
+
+### 🔴 P0：登录状态下仍然下 360P
+
+**真因（两个独立缺陷叠加）**：
+
+**缺陷 A：`defaultQuality` 被存成字符串 `"0"`**
+
+`options.js` 的 `collectFromForm()` 只对带 `data-type="number"` 属性的元素
+做 `Number()` 转换。而「默认清晰度」是 `<select>` —— 它的 `.value` **永远是
+字符串**。于是 storage 里存的是 `"0"` 而不是 `0`。
+
+JS 里 `!"0" === false`（非空字符串是 truthy），所以 `engine.js` 的：
+
+```js
+let quality = spec.quality || settings.defaultQuality || 0;
+if (!quality) quality = accept[0] || maxTrack || ...;   // ← 被跳过！
+```
+
+**不会**进入"自动选最高"分支，而是把字符串 `"0"` 当成"用户明确要求 0 档"，
+一路走到降级逻辑：
+
+```js
+const lower = accept.filter((q) => q <= quality)...;   // [] （没有 ≤0 的档位）
+const higher = accept.filter((q) => q > quality)...;   // 最小档
+const fallback = lower || higher || ...;                // → 16 = 360P
+```
+
+**这就是 360P 的来源**。修复（三层防御）：
+- `settings.js` 的 `loadSettings()`：对 `DEFAULT_SETTINGS` 里所有 number 字段
+  做 `Number()` 归一化（无论谁写的、什么时候写的，读出来都是数字）
+- `options.js` 的 `collectFromForm()`：按 `DEFAULT_SETTINGS` 的类型声明转换，
+  而不是依赖 `data-type` 属性 —— `<select>` 的数值字段也能正确转数字
+- `engine.js` 的 `buildPlan()`：改用 `Number(spec.quality) || Number(settings.defaultQuality) || 0`
+
+**缺陷 B：qn 被兜底成 64/80，等于自我设限**
+
+旧实现 `resolvedQn = qn > 0 ? qn : (vip ? 127 : (logged ? 80 : 64))`。
+nav 偶发失败（WAF / 断网）时 `logged=null` → 落到 **64**，客户端主动给自己
+设了 720P 上限。而实测（BV1uv411q7Mv，2026-09-19）证明：
+
+```
+未登录 qn=16  → dash.video ids=[32,32,16,16]  accept_quality=[116,80,64,32,16]
+未登录 qn=64  → dash.video ids=[32,32,16,16]  （完全一致）
+未登录 qn=80  → dash.video ids=[32,32,16,16]  （完全一致）
+未登录 qn=127 → dash.video ids=[32,32,16,16]  （完全一致）
+```
+
+即 **DASH 模式下 qn 根本不影响返回集合**（与 bilibili-API-collect 文档
+「该值在 DASH 格式下无效」、lux 恒传 `qn=127`、yt-dlp 干脆不传 qn 三方一致）。
+那兜底成 64 纯属自我设限。**现统一传 127**，让服务端按账号权限返回它能给的
+全部轨道，清晰度完全交给 `pickVideoTrack` 从 `dash.video[]` 里挑最高。
+
+**缺陷 C：`try_look=1` 会把已登录用户打成试看流**
+
+旧实现 `if (logged === false) params.try_look = 1`。nav 抖动返回 -101 时
+`isLogin:false` → 带 `try_look=1` → 服务端按试看返回低清，用户从 1080P
+掉到 360P 且完全不知道原因。yt-dlp 的做法是登录时主动 `pop('try_look')`。
+**现完全移除该参数**，让服务端按 Cookie 自行判断。
+
+新增/更新测试：
+- `test-quality-pick.mjs` [6]：`defaultQuality` 为字符串 `"0"` 时仍走自动（21 项）
+- `test-playurl-routing.mjs` [4][5]：qn=0 → 请求 127；任何情况都不带 try_look（14 项）
+- `test-api-validation.mjs` 场景 11：4 种账号状态下都传 127 且不带 try_look（26 项）
+
+### 修复：popup 静默重置用户的清晰度设置
+
+`popup.js` 的 `startDownload()` 每次都会写 `defaultQuality: 0`，等于用户
+在设置页选了「1080P」后，点一次下载就被悄悄改回「自动」，下次打开设置页
+发现设置"没保存"。本次下载的清晰度已经通过 `specs[].quality` 显式传递，
+不需要回头改全局默认值 —— 已移除这行。
+
+### 新增：清晰度诊断日志
+
+任务开始时会打一行 `清晰度诊断`，包含 `accept_quality` / `dashVideos` /
+`picked` / `specQuality` / `settingsDefaultQuality`。下次再遇到"怎么只有
+360P"，看这一行即可判定：
+- `dashVideos` 里有 80/112 而 `picked` 是 16 → 客户端选轨 bug
+- `dashVideos` 最大只有 16/32 → 服务端没给高画质（Cookie 没带上 / 内容受限）
+
 ## [1.4.19] - 2026-09-19
 
 ### 与 yt-dlp 对照后：修正一个**会误导用户**的错误码文案

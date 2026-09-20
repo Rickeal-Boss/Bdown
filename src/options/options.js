@@ -55,9 +55,20 @@ function collectFromForm() {
     const key = el.dataset.key;
     if (el.type === 'checkbox') {
       patch[key] = el.checked;
-    } else if (el.dataset.type === 'number') {
-      const n = Number(el.value);
-      patch[key] = Number.isFinite(n) ? n : DEFAULT_SETTINGS[key];
+    } else if (typeof DEFAULT_SETTINGS[key] === 'number') {
+      // ★ 关键：**所有**在 DEFAULT_SETTINGS 里声明为 number 的字段都要转数字，
+      // 不能只看 `data-type="number"` 属性。`<select>` 的 .value 永远是**字符串**，
+      // 而 defaultQuality 是一个 select —— 如果按字符串存进 storage，
+      // 下游 `if (!quality)` 判断会踩坑：JS 里 `!"0" === false`
+      // （非空字符串是 truthy），"自动(0)" 会被当成"用户明确要求 0 档"，
+      // 一路降级到 accept 最小档 360P。这正是 v1.4.20 修的那个 bug 的源头。
+      const raw = el.value;
+      if (raw === '' || raw === null || raw === undefined) {
+        patch[key] = DEFAULT_SETTINGS[key];
+      } else {
+        const n = Number(raw);
+        patch[key] = Number.isFinite(n) ? n : DEFAULT_SETTINGS[key];
+      }
     } else {
       patch[key] = el.value;
     }
