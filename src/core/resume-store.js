@@ -16,6 +16,7 @@
 
 import { OpfsWorkspace, FileHandleSink } from './sink.js';
 import { mergeRanges, completedBytes, serialise, deserialise } from './resume.js';
+import { warn } from './util.js';
 
 /** 清单默认有效期：7 天。过期就当没有，避免残留脏数据拖慢每次启动。 */
 export const RESUME_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -171,6 +172,17 @@ export class ResumeStore {
     const meta = await this.read(key);
     const verdict = canResume(meta, realSize, { ttlMs: this.ttlMs });
     if (!verdict.ok) {
+      // ★ 不能续传时必须**真的截断** .part 文件。
+      //
+      // 只返回 `ranges: []` 而不截断的话：调用方（engine.prepareStage → fetchTo）
+      // 正常路径**不会**调 resetSink（resetSink 只在 catch 分支里调），
+      // 于是旧的 .part 内容原样保留。新内容比它短时 → 尾部残留上一轮的字节
+      // → 产出"新头 + 旧尾"的坏文件。这与 mergeInto 忘记 truncate 是同一类问题。
+      try {
+        await sink.truncate(0);
+      } catch (err) {
+        warn(`续传清单不可用时截断 .part 失败（可能残留旧字节）`, err?.message);
+      }
       return { sink, ranges: [], resumed: false };
     }
     return { sink, ranges: mergeRanges(meta.ranges), resumed: true };

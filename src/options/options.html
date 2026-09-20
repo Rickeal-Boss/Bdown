@@ -84,10 +84,14 @@
         <label class="bd-field">
           <span class="bd-label">并发分片数（1–16）</span>
           <input class="bd-input" type="number" min="1" max="16" data-key="concurrency" data-type="number" />
-          <label class="bd-field">
-            <span>断点续传（实验性）</span>
-            <input type="checkbox" data-key="resumeEnabled" />
-          </label>
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">失败重试次数（0–5，每个地址）</span>
+          <input class="bd-input" type="number" min="0" max="5" data-key="retries" data-type="number" />
+        </label>
+        <label class="bd-switch field-inline">
+          <input type="checkbox" data-key="resumeEnabled" />
+          <span>断点续传（实验性）</span>
         </label>
         <label class="bd-field">
           <span class="bd-label">同时下载的任务数</span>
@@ -128,12 +132,13 @@
             <option value="ass">ASS</option>
             <option value="txt">纯文本</option>
           </select>
-          <label class="bd-field"><span>章节格式</span>
-            <select class="bd-select" data-key="chapterFormat">
-              <option value="txt">txt（YouTube 风格 0:00 标题）</option>
-              <option value="vtt">vtt（WebVTT 章节轨，播放器可识别）</option>
-            </select>
-          </label>
+        </label>
+        <label class="bd-field">
+          <span class="bd-label">章节格式</span>
+          <select class="bd-select" data-key="chapterFormat">
+            <option value="txt">txt（YouTube 风格 0:00 标题）</option>
+            <option value="vtt">vtt（WebVTT 章节轨，播放器可识别）</option>
+          </select>
         </label>
         <label class="bd-field">
           <span class="bd-label">字幕语言偏好</span>
@@ -174,7 +179,7 @@
       <div class="grid">
         <label class="bd-switch field-inline"><input type="checkbox" data-key="showFloatingButton" /><span>视频页右下角悬浮按钮</span></label>
         <label class="bd-switch field-inline"><input type="checkbox" data-key="showPlayerButton" /><span>播放器控制栏按钮</span></label>
-        <label class="bd-switch field-inline"><input type="checkbox" data-key="notifyOnComplete" /><span>下载完成提示</span></label>
+        <label class="bd-switch field-inline"><input type="checkbox" data-key="notifyOnComplete" /><span>下载完成时提示<small>（页面内浮层；在后台标签页时改为扩展图标徽章）</small></span></label>
       </div>
     </section>
 

@@ -148,13 +148,28 @@ function refresh() {
   ensurePlayerButton();
 }
 
+/**
+ * 播放器按钮检查是否已在下一帧排队。
+ *
+ * 为什么要节流：`observer` 监听的是 `document.body` 的 `childList + subtree`，
+ * 在 B 站首页、动态流这类页面每秒可触发**上百次** DOM 变更。此前每次变更都同步
+ * 跑一遍 `new URL()` + 多条正则 + DOM 查询 —— 纯浪费，且在低端机上可感卡顿。
+ * 改为用 rAF 合并到**每帧最多一次**（约 16ms 一次），效果等价但开销降一个量级。
+ */
+let playerCheckScheduled = false;
+
 const observer = new MutationObserver(() => {
   if (location.href !== lastUrl) {
     lastUrl = location.href;
     setTimeout(refresh, 400);
     return;
   }
-  ensurePlayerButton();
+  if (playerCheckScheduled) return;
+  playerCheckScheduled = true;
+  requestAnimationFrame(() => {
+    playerCheckScheduled = false;
+    ensurePlayerButton();
+  });
 });
 
 function start() {

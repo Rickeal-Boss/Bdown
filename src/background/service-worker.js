@@ -10,11 +10,32 @@ import { extractVideoId } from '../core/util.js';
 
 const DASHBOARD_URL = chrome.runtime.getURL('src/dashboard/index.html');
 
+/**
+ * 把任务追加进 `pendingTasks`，**串行化**执行。
+ *
+ * 为什么必须串行：`get` 与 `set` 是两步操作，中间有 await。用户快速连点两次
+ * 悬浮按钮 → 两个 OPEN_DASHBOARD 并发到达 → 都读到同一个旧值 →
+ * 后写的覆盖前写的 → **前一个任务凭空丢失**。
+ *
+ * MV3 Service Worker 是单线程事件循环，用一条 Promise 链就足以串行化
+ * （不需要真正的锁）。链上任何一步失败都会 `.catch` 掉，不会把后续写入卡死。
+ */
+let pendingTasksWriteChain = Promise.resolve();
+function appendPendingTasks(tasks) {
+  if (!tasks || !tasks.length) return Promise.resolve();
+  pendingTasksWriteChain = pendingTasksWriteChain
+    .catch(() => {})
+    .then(async () => {
+      const { pendingTasks: existing = [] } = await chrome.storage.local.get('pendingTasks');
+      await chrome.storage.local.set({ pendingTasks: [...existing, ...tasks] });
+    });
+  return pendingTasksWriteChain;
+}
+
 /** 打开（或聚焦）下载中心，并把待下载任务塞进 storage 交给它。 */
 async function openDashboard(pendingTasks = [], { focus = true } = {}) {
   if (pendingTasks.length) {
-    const { pendingTasks: existing = [] } = await chrome.storage.local.get('pendingTasks');
-    await chrome.storage.local.set({ pendingTasks: [...existing, ...pendingTasks] });
+    await appendPendingTasks(pendingTasks);
   }
   const tabs = await chrome.tabs.query({ url: `${DASHBOARD_URL}*` });
   if (tabs.length) {

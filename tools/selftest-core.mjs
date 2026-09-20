@@ -12,7 +12,7 @@
  */
 import { createHash } from 'node:crypto';
 import { escapeHtml, sanitizeFilename } from '../src/core/util.js';
-import { formUrlEncode } from '../src/core/wbi.js';
+import { formUrlEncode, getMixinKey, signParams, resetMixinKey } from '../src/core/wbi.js';
 import { md5 } from '../src/core/md5.js';
 import { av2bv, bv2av, isBvid } from '../src/core/avbv.js';
 import { buildPlan } from '../src/core/engine.js';
@@ -102,6 +102,48 @@ check('已知向量 BV1xx411c7mD <-> av2', () => eq(av2bv(2), 'BV1xx411c7mD'));
 // 以下期望值由独立的 Python 实现算出（table/S/XOR/ADD 同一套常量）
 check('av2bv(0) === BV1xx411c7mX', () => eq(av2bv(0), 'BV1xx411c7mX'));
 check('av2bv(170001) === BV17x411w7KC', () => eq(av2bv(170001), 'BV17x411w7KC'));
+
+console.log('\n[4.5] WBI mixin key —— 用 bilibili-API-collect 官方示例核验');
+{
+  // MIXIN_KEY_ENC_TAB 是一张 64 项的固定乱序表，一旦被改坏（哪怕一个数字），
+  // 所有 WBI 签名全错 → 所有 playurl 调用返回 -403，且错误提示完全看不出是签名问题。
+  // 这里用官方公开的那对 img/sub URL 反推 mixinKey 并比对，作为这张表的"防篡改锁"。
+  const navMock = async () => ({
+    data: {
+      wbi_img: {
+        img_url: 'https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png',
+        sub_url: 'https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png',
+      },
+    },
+  });
+  resetMixinKey();
+  const key = await getMixinKey(navMock);
+  check('官方示例推出 mixinKey = ea1db124af3c7062474693fa704f4ff8',
+    () => eq(key, 'ea1db124af3c7062474693fa704f4ff8'));
+  check('mixinKey 长度为 32', () => (key.length === 32 ? '' : `长度 ${key.length}`));
+
+  // 签名算法自洽性：按官方定义"参数升序 → urlencode → md5(query + mixinKey)"
+  const realNow = Date.now;
+  Date.now = () => 1702204169000;
+  const signed = signParams({ foo: '114', bar: '514', baz: 1919810 }, key);
+  Date.now = realNow;
+  const manual = md5('bar=514&baz=1919810&foo=114&wts=1702204169' + key);
+  check('w_rid = md5(sortedQuery + mixinKey)（与手工核算一致）', () => eq(signed.w_rid, manual));
+  // 注意：signParams 会把所有值统一转成字符串（便于 urlencode），所以这里比 Number()
+  check('wts 为秒级时间戳', () => eq(Number(signed.wts), 1702204169));
+  check('签名参数按 key 升序且剔除非法字符', () => {
+    const keys = Object.keys(signed).filter((k) => k !== 'w_rid');
+    const sorted = [...keys].sort();
+    return keys.join(',') === sorted.join(',') ? '' : `未升序：${keys.join(',')}`;
+  });
+
+  // 缺密钥时必须给出明确错误，而不是算出个错签名
+  resetMixinKey();
+  let threw = false;
+  try { await getMixinKey(async () => ({ data: {} })); } catch { threw = true; }
+  check('nav 缺 wbi_img 时抛明确错误（不静默产出错签名）', () => (threw ? '' : '未抛错'));
+  resetMixinKey();
+}
 
 console.log('\n[5] sanitizeFilename — 落盘安全');
 check('禁止路径分隔符', () => eq(sanitizeFilename('a/b\\c'), 'a_b_c'));

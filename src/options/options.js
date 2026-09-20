@@ -85,6 +85,9 @@ function scheduleSave() {
     // 数值字段做一次范围修正
     patch.concurrency = Math.min(16, Math.max(1, patch.concurrency || 8));
     patch.maxParallelTasks = Math.min(8, Math.max(1, patch.maxParallelTasks || 2));
+    // retries：0 是合法值（不重试），所以不能用 `|| 2` 兜底（0 是 falsy 会被吞掉）
+    const rt = Number(patch.retries);
+    patch.retries = Number.isFinite(rt) ? Math.min(5, Math.max(0, Math.round(rt))) : 2;
     patch.danmakuOpacity = Math.min(1, Math.max(0.1, patch.danmakuOpacity || 0.85));
     patch.danmakuFontScale = Math.min(2, Math.max(0.5, patch.danmakuFontScale || 1));
     await saveSettings(patch);

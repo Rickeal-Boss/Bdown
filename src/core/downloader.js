@@ -42,8 +42,60 @@ function httpError(res) {
   return err;
 }
 
-function doFetch(url, init) {
-  return (injectedFetch || globalThis.fetch)(url, init);
+/**
+ * 单个网络请求的**响应头**超时（毫秒）。
+ *
+ * 为什么必须有：原来这里是裸 `fetch`，没有任何超时。一旦连接挂起（半开连接、
+ * 服务端不响应、代理卡住），`await` 会**永远不返回** —— 任务永久停在
+ * `downloading`，`runningCount` 永不归还，dashboard 里 startAll 的等待循环也一直转，
+ * 用户只能杀掉整个下载中心标签页。
+ *
+ * 为什么只计到响应头：一旦服务端开始返回数据，说明连接是活的；此时再掐断会误杀
+ * 大分片下载（单个分片最大 16MB，弱网下传几十秒很正常）。
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * 带响应头超时的 fetch，同时保留外部 signal（用户取消）的语义。
+ */
+async function doFetch(url, init, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+  const fetchImpl = injectedFetch || globalThis.fetch;
+  const external = init?.signal;
+  const ctrl = new AbortController();
+
+  let timer = null;
+  const timeoutPromise = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`请求超时：${timeoutMs}ms 内未收到响应头`);
+      err.timeout = true;
+      ctrl.abort(err);
+      reject(err);
+    }, timeoutMs);
+  });
+  const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+
+  // ★ 必须把**外部 signal（用户取消）与超时 signal 合并**后传给 fetch。
+  //
+  // 只传自建的 ctrl.signal 会把外部取消断开；而"转发 abort 事件"的写法若在
+  // 拿到响应头后移除监听，则**读取 body 阶段无法取消** —— 用户点了取消，
+  // 大分片仍会把几十 MB 读完才停（v1.4.22 引入、随即修复）。
+  // `AbortSignal.any` 让两个 signal 中任意一个 abort 都能立刻中断 fetch，
+  // 且中断会贯穿 header 与 body 两个阶段。
+  let combined = ctrl.signal;
+  if (external && external.addEventListener && typeof AbortSignal.any === 'function') {
+    try { combined = AbortSignal.any([external, ctrl.signal]); } catch { combined = ctrl.signal; }
+  }
+
+  try {
+    // 竞速：谁先完成算谁。拿到 res（响应头）后立刻清掉计时器，
+    // 后续读取 body 不再受此时限约束（避免误杀大分片下载）。
+    const res = await Promise.race([fetchImpl(url, { ...init, signal: combined }), timeoutPromise]);
+    clear();
+    return res;
+  } catch (err) {
+    clear();
+    throw err;
+  }
 }
 
 const DEFAULT_CONCURRENCY = 8;
@@ -140,9 +192,28 @@ export async function downloadRanged({
    * 但要写到整个文件的对应位置，否则后一段会从 0 开始覆盖前一段。
    */
   writeOffset = 0,
+  /**
+   * **每个地址的额外重试次数**（settings.retries）。
+   *
+   * 语义：单个分片对同一个地址最多尝试 `retries + 1` 次（1 次首试 + retries 次重试）。
+   * 旧实现把这里**硬编码成 2**，而设置页的 `retries`（"失败重试次数"）从来没人读 ——
+   * 用户调整它完全没有效果（v1.4.22 修复）。
+   *
+   * 注意总尝试次数还要乘上地址数（主地址 + backupUrls）：`list.length × (retries + 1)`。
+   */
+  retries = 2,
 }) {
   const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
   if (!list.length) throw new Error('没有可用的下载地址');
+
+  // 归一化：必须用 Number.isFinite 兜住 NaN —— 否则 NaN 会一路传进 retry() 的
+  // `for (i = 0; i < times; i++)`，使循环**一次都不执行**，表现为"分片静默不下载"
+  // 且抛出 undefined（错误信息全丢）。这个坑在 v1.4.22 真实踩过一次。
+  const rawRetries = Number(retries);
+  const safeRetries = Number.isFinite(rawRetries)
+    ? Math.min(5, Math.max(0, Math.floor(rawRetries)))
+    : 2; // 默认与旧硬编码行为一致
+  const attemptsPerUrl = safeRetries + 1;
 
   /* ---------- 1. 拿到精确大小 ---------- */
   if (probe) {
@@ -202,6 +273,17 @@ export async function downloadRanged({
       lastBytes = downloaded;
     }
     const elapsed = (now - startedAt) / 1000;
+
+    // 本次上报周期内完成的全部分片区间（闭区间，与 HTTP Range 一致）。
+    // 断点续传靠它增量记账；不需要续传时可以忽略。`range` 保留最后一个仅为兼容。
+    //
+    // ★ 必须先**取值再清空**。旧写法是
+    //     ranges: pendingRanges.splice(0), range: pendingRanges[pendingRanges.length - 1]
+    //   `splice(0)` 已经把数组清空了，下一行再取末位必然是 undefined →
+    //   `range` 恒为 null（v1.4.22 修复）。
+    const done = pendingRanges.slice();
+    pendingRanges.length = 0;
+
     onProgress({
       downloaded,
       total: size,
@@ -209,10 +291,8 @@ export async function downloadRanged({
       speed,
       elapsed,
       eta: speed > 0 ? (size - downloaded) / speed : Infinity,
-      // 本次上报周期内完成的全部分片区间（闭区间，与 HTTP Range 一致）。
-      // 断点续传靠它增量记账；不需要续传时可以忽略。`range` 保留最后一个仅为兼容。
-      ranges: pendingRanges.length ? pendingRanges.splice(0) : null,
-      range: pendingRanges.length ? pendingRanges[pendingRanges.length - 1] : null,
+      ranges: done.length ? done : null,
+      range: done.length ? done[done.length - 1] : null,
     });
   };
 
@@ -253,9 +333,23 @@ export async function downloadRanged({
       throw new Error(`分片长度不符：期望 ${expected}，实际 ${bytes.length}`);
     }
 
-    // status 200：服务器忽略了 Range，返回的是整个文件
-    if (bytes.length !== expected) return { bytes, shortAtEof: true, total: bytes.length };
-    return { bytes, shortAtEof: false };
+    // status 200：服务器**忽略了 Range 头**，返回的是整个文件而非请求的片段。
+    //
+    // ★ 绝不能把它当成"成功拿到了这个分片"——整个 body 会被写到该分片的偏移上，
+    //   而其余分片也各自拿到整个 body 再写到各自偏移，结果是文件被反复覆盖、
+    //   长度越界数倍、内容全是重叠垃圾（静默产出坏文件，v1.4.22 修复的 P1）。
+    //
+    // 正确做法：抛一个带 `rangeIgnored` 标记的明确错误，
+    //   - 上层（engine.fetchTo）已有兜底：回退到 downloadSequential 单请求顺序下载
+    //   - worker 循环见到该标记会立即放弃，不再重试、不再试备用地址
+    //     （否则 8 个分片 × 重试次数 × 备用地址 = 把整个文件重复下载几十遍）
+    throw Object.assign(
+      new Error(
+        `服务器忽略了 Range 请求（返回 200 全量 ${bytes.length} 字节，期望 ${expected} 字节），` +
+          '该地址不支持分片下载',
+      ),
+      { rangeIgnored: true, status: 200 },
+    );
   };
 
   const worker = async () => {
@@ -266,10 +360,18 @@ export async function downloadRanged({
       const range = ranges[index];
 
       let lastError;
-      // 依次尝试主地址与备用地址，每个地址内部再重试 2 次
+      // 依次尝试主地址与备用地址，每个地址内部再重试 `retries` 次（见 attemptsPerUrl）
       for (const url of list) {
         try {
-          const out = await retry(() => fetchRange(url, range, signal), { times: 2, baseDelay: 500 });
+          // 两类错误**不重试**：
+          //   - DownloadAborted（用户取消）：已取消还要跑满次数并 sleep 是纯延迟
+          //   - rangeIgnored（服务器不支持 Range）：重试只会把整个文件再下一遍，
+          //     8 分片 × (retries+1) 可达 24 次全量下载
+          const out = await retry(() => fetchRange(url, range, signal), {
+            times: attemptsPerUrl,
+            baseDelay: 500,
+            shouldRetry: (err) => !(err instanceof DownloadAborted) && !err?.rangeIgnored,
+          });
           throwIfAborted();
           await sink.writeAt(range.start + writeOffset, out.bytes);
           range.done = true;
@@ -285,6 +387,9 @@ export async function downloadRanged({
         } catch (err) {
           if (err instanceof DownloadAborted) throw err;
           if (signal?.aborted) throw new DownloadAborted();
+          // 服务器不支持 Range：分片下载这条路走不通，立即放弃。
+          // 继续重试/换备用地址只会把整个文件重复下载一遍又一遍。
+          if (err?.rangeIgnored) throw err;
           lastError = err;
         }
       }

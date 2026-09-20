@@ -8,7 +8,7 @@
  *       7 高级弹幕、8 代码弹幕、9 BAS 弹幕。
  */
 
-import { toAssTime, toSrtTime, sanitizeFilename } from './util.js';
+import { toAssTime, toSrtTime, sanitizeFilename, escapeAssText } from './util.js';
 
 /** 字号换算基准：B 站播放器把 25 号字渲染在约 480px 高的画布上。 */
 const FONT_BASE_HEIGHT = 480;
@@ -58,9 +58,9 @@ function assColor(rgb, alpha = 0) {
   return `&H${hex(alpha)}${hex(b)}${hex(g)}${hex(r)}&`;
 }
 
-function escapeAss(text) {
-  return text.replace(/\\/g, '\\\\').replace(/\{/g, '\\{').replace(/\}/g, '\\}').replace(/\r?\n/g, '\\N');
-}
+// ASS 转义已提到 util.js 的 escapeAssText —— 字幕（subtitle.js）需要同一份实现，
+// 两处各写一份迟早会不一致（而弹幕这边漏转义正是我们担心的失败形态）。
+const escapeAss = escapeAssText;
 
 /** 粗略估算文本像素宽度（中文字符按 1em，其余按 0.55em）。 */
 function measure(text, fontSize) {

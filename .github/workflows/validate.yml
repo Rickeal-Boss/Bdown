@@ -19,11 +19,21 @@ jobs:
       - name: 静态校验（JS 语法 / JSON / manifest 引用 / DNR 规则 / 导入图）
         run: node tools/validate.mjs
 
-      - name: 核心模块自检（XSS / urlencode / md5 / av-bv / 文件名安全）
+      - name: 核心模块自检（XSS / urlencode / md5 / av-bv / WBI mixin key / 文件名安全）
         run: node tools/selftest-core.mjs
+
+      # 安全不变量：接口返回的 URL 必须过域名白名单才能带凭证、HTML 转义覆盖 5 字符、
+      # 文件名挡路径穿越、源码无 eval 类危险模式、manifest 不多余索取权限。
+      - name: 安全不变量自检（URL 白名单 / 转义 / 穿越 / 权限）
+        run: node tools/test-security.mjs
 
       - name: api.get 本地预校验自检（防止无 bvid/avid/ep_id 请求触发 -400）
         run: node tools/test-api-validation.mjs
+
+      # 取消必须贯穿整条请求（含读 body 阶段）；不该重试的错误不得重试；
+      # 服务器忽略 Range 时不能重复全量下载；retry 的 times=NaN 不能静默 no-op
+      - name: 下载器不变量自检（取消传播 / 重试语义 / rangeIgnored）
+        run: node tools/test-downloader.mjs
 
       - name: 断点续传逻辑自检（区间合并 / 缺失计算 / 续传集成）
         run: node tools/test-resume.mjs
@@ -51,6 +61,16 @@ jobs:
       # 由 lint-ci-coverage.mjs 在 v1.4.21 发现。现在补上。
       - name: 合集解析自检（ugc_season 展开 / 可批量化判定）
         run: node tools/test-season.mjs
+
+      # 弹幕文本完全不可控（颜文字、代码片段、{\an8} 之类），而 ASS 里 { } \ 是控制字符。
+      # 转义漏掉会产出结构损坏的 ASS。这个模块此前**零测试覆盖**（v1.4.22 补上）。
+      - name: 弹幕模块自检（ASS 控制字符转义 / SRT 结构 / 过滤 / 边界）
+        run: node tools/test-danmaku.mjs
+
+      # 字幕文本（多为 AI 生成）同样不可控：ASS 里 { } \ 是控制字符、
+      # 物理换行会切断事件行；SRT 里连续换行会切断块。此模块此前零测试覆盖。
+      - name: 字幕模块自检（ASS 转义 / SRT 块结构 / 语言挑选）
+        run: node tools/test-subtitle.mjs
 
       - name: NFO 元数据自检（XML 转义 / movie+episode+tvshow 三形态）
         run: node tools/test-nfo.mjs

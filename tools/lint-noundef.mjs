@@ -63,6 +63,7 @@ const GLOBALS = new Set([
   'localStorage', 'sessionStorage', 'indexedDB', 'caches',
   'DOMParser', 'XMLSerializer', 'XMLHttpRequest', 'WebSocket',
   'MutationObserver', 'IntersectionObserver', 'ResizeObserver',
+  'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback',
   'AudioContext', 'OfflineAudioContext', 'Image', 'ImageBitmap',
   'OffscreenCanvas', 'Worker', 'chrome', 'browser',
   // Node（tools/ 脚本用得到）

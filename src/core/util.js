@@ -4,20 +4,41 @@
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** 带指数退避的重试。 */
-export async function retry(fn, { times = 3, baseDelay = 400, onRetry } = {}) {
+/**
+ * 带指数退避的重试。
+ *
+ * ⚠️ `times` 必须**先归一化再进循环**。若直接 `for (let i = 0; i < times; i++)`
+ * 而 `times` 是 NaN / 0 / 负数，循环**一次都不会执行**，于是：
+ *   - `fn` 从未被调用（表现为"这个操作静默没发生"）
+ *   - `lastErr` 还是 undefined，最后 `throw undefined` —— 错误信息全部丢失
+ * 这两点叠加起来极难排查。v1.4.22 真实踩过一次（retries 设置透出 NaN）。
+ *
+ * 这里统一兜底：非有限数 / <1 一律按 1 次处理（至少执行一次，让真实错误能抛出来）。
+ */
+export async function retry(fn, { times = 3, baseDelay = 400, onRetry, shouldRetry } = {}) {
+  const n = Number(times);
+  const total = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1;
   let lastErr;
-  for (let i = 0; i < times; i++) {
+  for (let i = 0; i < total; i++) {
     try {
       return await fn(i);
     } catch (err) {
       lastErr = err;
-      if (i === times - 1) break;
+      // ★ 允许调用方声明"这类错误不值得重试"。
+      //
+      // 没有它时会出两类真实问题：
+      //   1. 服务器不支持 Range（rangeIgnored）：重试只会把**整个文件**再下一遍 ——
+      //      默认 8 并发分片 × (retries+1) = 24 次全量下载，纯浪费且拖慢失败反馈。
+      //   2. 用户取消（DownloadAborted）：已取消还要跑满重试次数并 sleep，
+      //      retries=5 时可多拖 ~15s 才响应取消。
+      if (shouldRetry && !shouldRetry(err)) break;
+      if (i === total - 1) break;
       if (onRetry) onRetry(err, i + 1);
       await sleep(baseDelay * 2 ** i);
     }
   }
-  throw lastErr;
+  // total >= 1，所以 lastErr 必然被赋值过；这里再兜一层防止未来改动又把循环跳过
+  throw lastErr ?? new Error('retry: 未执行任何尝试且无错误对象（times 参数异常）');
 }
 
 export function formatBytes(bytes, digits = 2) {
@@ -75,8 +96,34 @@ export function toAssTime(seconds) {
   return `${h}:${p(m)}:${p(s)}.${p(c)}`;
 }
 
-/** Windows 保留设备名（带不带扩展名都不允许作为文件名）。 */
-const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
+/**
+ * ASS 字幕文本转义。
+ *
+ * ASS 里 `{` `}` `\` 是**控制字符**：`{\...}` 是 override tag，`\N` 是强制换行。
+ * 用户文本（弹幕、AI 生成字幕）里出现这些很常见，不转义就会产出结构损坏的 ASS
+ * —— 表现为整段不显示、或把 `{\an8}` 这类标记当原文显示出来。
+ *
+ * 顺序**必须**是：先转 `\`（否则后面补的反斜杠会被二次转义），再转 `{` `}`，
+ * 最后把真换行换成 `\N`（ASS 的换行标记）—— **不能**留物理换行，
+ * 否则会把 Dialogue 事件行切断（一条事件变成两行，ASS 直接损坏）。
+ *
+ * 弹幕（danmaku.js）与字幕（subtitle.js）共用这一份实现。
+ */
+export function escapeAssText(text) {
+  return String(text ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\{/g, '\\{')
+    .replace(/\}/g, '\\}')
+    .replace(/\r?\n/g, '\\N');
+}
+
+/**
+ * Windows 保留设备名（带不带扩展名都不允许作为文件名）。
+ *
+ * 分隔符除了 `.` 还要认**空格**：Windows 会把 "CON .txt" 也当成设备名，
+ * 而旧正则 `(\.|$)` 匹配不到空格形式（v1.4.22 修复）。
+ */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|\s|$)/i;
 
 /** 去掉文件名中的非法字符，并限制长度。 */
 export function sanitizeFilename(name, { replacement = '_', maxLength = 120 } = {}) {
@@ -94,10 +141,42 @@ export function sanitizeFilename(name, { replacement = '_', maxLength = 120 } = 
     .replace(/[. ]+$/, '');
   // 保留设备名（con / nul / com1 …）在 Windows 上写盘会失败，加下划线前缀规避
   if (WINDOWS_RESERVED.test(out)) out = `_${out}`;
-  if (out.length > maxLength) out = out.slice(0, maxLength).trim().replace(/[. ]+$/, '');
+  if (out.length > maxLength) out = truncateKeepExtension(out, maxLength);
   // 只剩下 . _ - 空白的名字没有有效信息，统一兜底
   if (!out || !/[^\s._-]/.test(out)) return 'untitled';
   return out;
+}
+
+/**
+ * 截断到 maxLength，但**保住末尾扩展名**，且不切出孤立代理项。
+ *
+ * 为什么必须保扩展名：调用方（`engine.js` 的 createOutput / finishOutput）传进来的是
+ * 已经拼好后缀的完整文件名，如 `${task.filename}.mp4`。标题一长（中文标题很容易 >120 字），
+ * 旧的 `out.slice(0, maxLength)` 会把 `.mp4` 整个切掉 —— 产物是**没有扩展名的文件**，
+ * 播放器和 Jellyfin 都识别不了，而用户只会看到"下载成功了但打不开"。
+ *
+ * 为什么不能切出孤立代理项：emoji 等增补平面字符占两个 UTF-16 码元，
+ * 正好从中间切开会留下一个孤立的高代理项，产出非法字符串（实测 '😀'×70 → 末位 0xDE00）。
+ */
+function truncateKeepExtension(out, maxLength) {
+  // 末尾形如 ".mp4" / ".danmaku.ass" 的扩展名（最多 20 字符，避免把整个长名字当扩展名）
+  const extMatch = out.match(/\.[^.\\/]{1,20}$/);
+  const ext = extMatch && extMatch[0].length < maxLength ? extMatch[0] : '';
+  const keep = Math.max(1, maxLength - ext.length);
+  let base = ext ? out.slice(0, out.length - ext.length) : out;
+  let result = base.slice(0, keep) + ext;
+
+  // 丢掉可能跨在高代理项上的半个字符
+  const last = result.charCodeAt(result.length - ext.length - 1);
+  const dropSurrogate = ext
+    ? (last >= 0xd800 && last <= 0xdbff)
+    : (result.charCodeAt(result.length - 1) >= 0xd800 && result.charCodeAt(result.length - 1) <= 0xdbff);
+  if (dropSurrogate) {
+    const head = result.slice(0, result.length - ext.length - 1);
+    result = head + ext;
+  }
+
+  return result.trim().replace(/[. ]+$/, '') || (ext ? `untitled${ext}` : '');
 }
 
 /** 解析 `1-3` / `1-` / `-3` / `5` 形式的分P选择表达式。 */
@@ -194,6 +273,62 @@ const HTML_ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
 
 export function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => HTML_ESCAPE_MAP[c]);
+}
+
+/**
+ * B 站自有域名后缀。用于判断"这个 URL 能不能带凭证请求"。
+ *
+ * 为什么需要：`/x/player/wbi/v2` 返回的 `subtitle_url` 是**接口数据**，不是我们拼的常量。
+ * 若直接 `fetch(url, { credentials: 'include' })` 而不校验域名，等于
+ * "对任意可控 URL 发起带凭证的请求" —— 攻击者只要能影响该字段（改包、恶意镜像、
+ * 中间人未启用 HSTS 时），就能借扩展之手向自己的域名发带 Cookie 的请求。
+ * Cookie 虽按域隔离（不会直接泄露 B 站 SESSDATA），但仍是应当堵住的转发面。
+ */
+const BILI_HOST_SUFFIXES = [
+  'bilibili.com',
+  'bilibili.tv',
+  'hdslb.com',
+  'biliapi.net',
+  'bilivideo.com',
+  'bilivideo.cn',
+];
+
+/**
+ * 把接口给的 URL 规整成**可安全带凭证请求**的形式。
+ *
+ * 做三件事：
+ *   1. `//host/path` → `https://host/path`（协议相对 URL）
+ *   2. **强制 https** —— 明文 http 下带 Cookie 等于把凭证放上网线
+ *   3. 域名必须在 B 站自有域白名单内
+ *
+ * @param {string} rawUrl
+ * @returns {{ url: string, safe: boolean, reason?: string }}
+ *   `safe=false` 表示**不应**带凭证（调用方应降级为 `credentials: 'omit'` 或跳过）
+ */
+export function sanitizeBiliUrl(rawUrl) {
+  const raw = String(rawUrl ?? '').trim();
+  if (!raw) return { url: '', safe: false, reason: '空 URL' };
+
+  let candidate = raw;
+  if (candidate.startsWith('//')) candidate = `https:${candidate}`;
+
+  let parsed;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return { url: '', safe: false, reason: '无法解析的 URL' };
+  }
+
+  if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+  if (parsed.protocol !== 'https:') {
+    return { url: '', safe: false, reason: `不支持的协议：${parsed.protocol}` };
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const ok = BILI_HOST_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`));
+  if (!ok) return { url: parsed.toString(), safe: false, reason: `非 B 站域名：${host}` };
+
+  return { url: parsed.toString(), safe: true };
 }
 
 export function log(...args) {

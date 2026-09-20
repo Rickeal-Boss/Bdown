@@ -1,3 +1,208 @@
+## [1.4.22] - 2026-09-20
+
+> 视频下载主链路（清晰度 / 登录）已由 v1.4.20-v1.4.21 修好。本轮把审查面**扩到其余全部
+> 选项与功能**，派 4 路独立审查 + 自查，共发现 **4 个 P0/P1 数据损坏或功能失效**、
+> 若干 P2，并实证**证伪**了 2 条审查结论。
+>
+> 原本派了 4 路，其中一路（字幕 / 章节 / NFO）因频率限制失败。
+> **后由主理人自己补审完这三个模块**，发现并修复了字幕模块的 2 个真 bug（见下）。
+
+### 🔴 P1：合并输出不截断 —— 同名文件二次下载产出坏 MP4
+
+`engine.js` 的 `mergeInto` 只把 `writeSink.size = 0`，**不截断文件**。而 `createOutput` 是用
+`keepExistingData: true` 打开的目标文件：同名文件二次下载、或上次失败留下字节时，
+新内容更短 → 尾部残留上一轮字节 → 产物 = 新 moov + 旧 mdat 尾巴，文件长度对不上、结构损坏
+（能播但花屏/时长错，或直接打不开）。
+
+这与 v1.4.7 修的 `resetSink` 是同一类问题 —— **覆盖写不会缩短文件，必须显式截断**。
+已改为 `await writeSink.truncate(0)`。
+
+### 🔴 P1：服务器忽略 Range（返回 200 全量）→ 文件越界数倍、内容全废
+
+`downloader.js` 在 `status === 200` 且长度不符时，把**整个响应体**当成一个分片返回。
+于是 8 个分片各自拿到整个文件、各自写到自己的偏移 → 文件被反复覆盖、长度越界数倍、
+内容全是重叠垃圾（实测 3MB 文件产出 5.5MB 垃圾）。
+
+已改为抛出带 `rangeIgnored` 标记的明确错误：worker 循环见到即**立即放弃**（不重试、
+不试备用地址，否则 8 分片 × 重试次数会把整个文件重复下载几十遍），
+由 `engine.fetchTo` 已有的兜底回退到 `downloadSequential` 单请求顺序下载。
+
+### 🔴 P1：长标题产出**无扩展名**文件
+
+`sanitizeFilename` 截断时直接 `slice(0, 120)`，而调用方传的是已拼好后缀的完整文件名
+（`${task.filename}.mp4`）。中文标题很容易超过 120 字 → `.mp4` 被整个切掉 →
+产出**没有扩展名的文件**，播放器与 Jellyfin 都识别不了，用户只看到"下载成功但打不开"（实测）。
+
+已改为 `truncateKeepExtension()`：只截主干、保住末尾扩展名；同时避免从 emoji 等
+增补平面字符中间切开（实测 '😀'×70 曾产出孤立代理项 0xDE00）。
+顺带修了 Windows 保留名的空格形式（"CON .txt" 旧正则 `(\.|$)` 匹配不到空格）。
+
+### 🔴 P1：字幕文本未转义 + SRT 块结构会被切断
+
+字幕模块（`subtitle.js`）**此前零测试覆盖**。补审后实测发现两个真 bug：
+
+1. **ASS 未转义**：`subtitleToAss` 把 `content` **原样**拼进 Dialogue 行，而弹幕那边是有
+   `escapeAss` 的。字幕文本含 `{` `}` `\` 或真换行时 → ASS 结构损坏（override 块被意外开闭、
+   物理换行把事件行切断）。
+2. **SRT 块被切断**：SRT **以空行分隔块**，字幕文本若含连续换行（`\n\n`）会被切成两个块。
+   实测 3 条字幕产出 4 块，块序变成 `["1","2","第二段","3"]` —— 整份 SRT 损坏。
+
+**修复**：
+- 把 ASS 转义提到 `util.js` 的 `escapeAssText()`，**弹幕与字幕共用一份**（两处各写一份迟早不一致）
+- `subtitleToSrt` 归一化文本：折叠连续空行（保留单个换行，多行字幕是合法的）
+- 新增 `tools/test-subtitle.mjs`（29 项）
+
+### 🔴 P1：`pickSubtitle` 对 AI 中文字幕失效
+
+B 站 **AI 中文字幕的 `lan` 实际是 `ai-zh`**，**不以 `zh` 开头**。旧逻辑用
+`String(s.lan).startsWith('zh')` 判中文 → `ai-zh` 拿不到任何中文加成；同时 `!/ai/i` 又把它判为
+AI 扣掉人工字幕的分。结果是**中文 5 分 vs 英文 5 分同分**，谁在数组前面谁赢 ——
+用户"偏好中文"的设置等于失效。改为 `/zh/i` 判定（覆盖 `ai-zh` / `zh-CN` / `zh-Hans`），
+并兼顾 `lan_doc` 含"中文/Chinese"的情况。
+
+### 🔴 P1：任务凭空丢失（两处竞态）
+
+1. **初始化窗口**：`dashboard.js` 先 `loadPendingTasks()`，中间还 `await ensureAccount()`
+   （网络往返数秒），**之后**才注册 `storage.onChanged`。窗口内派发的任务无人接收，
+   而 SW 已刻意移除 `tabs.reload()` 不会补偿 → 任务消失，只有重开下载中心才恢复。
+   → 改为**先注册监听、再消费**。
+2. **重复消费**：onChanged handler 直接用 `changes.pendingTasks.newValue`（某次写入瞬间的
+   快照）。两次快速派发（write1=[A]、write2=[A,B]）触发两个事件，各自按自己的快照建任务
+   → **任务 A 被建两次 → 同一视频重复下载**。
+   → 改为每次重新读 storage 当前值 + 立即删除 + 按 `bvid+aid+cid+epId+pageIndex+quality`
+   指纹去重（`acceptPending()`）。
+3. **SW 读-改-写非原子**：两次并发 `OPEN_DASHBOARD` 都读到同一个旧值，后写覆盖前写 → 丢任务。
+   → 用 Promise 链串行化（`appendPendingTasks`）。
+
+### P1/P2：其余修复
+
+- **续传清单不可用时 `.part` 不截断**：只返回 `ranges: []`，而 `fetchTo` 正常路径不调
+  `resetSink`（只在 catch 分支调）→ 旧字节残留。已补 `truncate(0)`。
+- **`retries`（失败重试次数）是完全死设置**：设置页**没有控件**，`downloader.js` 硬编码
+  `{ times: 2 }`，全项目无人读取。已接线（`downloadRanged` 新增 `retries` 参数，
+  `engine.fetchTo` 透传 `settings.retries`，语义 = 每个地址的额外重试次数，钳制 0-5）
+  并补上 UI 控件。
+- **`retry()` 的 NaN 陷阱**（我自己引入又自己修的）：`times` 为 NaN 时
+  `for (i=0; i<NaN; i++)` **一次都不执行** → 操作静默不发生且 `throw undefined`（错误信息全丢）。
+  已在 `util.retry` 归一化 `times`，并在 `downloadRanged` 用 `Number.isFinite` 兜住。
+- **设置页改动对已打开的下载中心无效**：`engine.updateSettings()` 只在本页 saveMode 下拉变化时
+  调用。在设置页改并发数/重试/附加内容后回到下载中心，引擎仍用启动时的旧值。
+  → 接上了此前一直未使用的 `onSettingsChanged()`。
+- **网络请求无超时**：裸 `fetch`，连接挂起时任务**永久停在 downloading**，`runningCount` 永不
+  归还。已加 30s **响应头**超时（只计到响应头，避免误杀大分片下载；实测挂起场景 30s 后正确抛错）。
+- **`notifyOnComplete` 名不副实**：标签写"下载完成提示"，但 manifest 无 `notifications` 权限、
+  全仓库 0 处 `chrome.notifications`，后台标签页里用户收不到任何提示。
+  → 用**扩展图标徽章**补上（`chrome.action.setBadgeText` 不需要额外权限，不增加安装警告），
+  标签也改为如实描述。
+- 修掉设置页两处**嵌套 `<label>`**（无效 HTML）。
+
+### 已实证证伪的审查结论（不盲信报告）
+
+- ✗ "弹幕 ASS 换行会截断事件" —— 实测 `escapeAss` 已正确把 `\n` 转成 `\\N`，6 条含敌意字符的
+  弹幕全部生成了事件，无丢失。
+- ✗ "弹幕 `{}` 转义缺失" —— 实测已正确转义为 `\{` `\}`；我第一版测试断言写得太 naive
+  （转义后的 `\{` 本身含 `{` 字符导致误报），已改为检测"未被反斜杠转义的裸花括号"。
+
+### 🔒 安全专项审查（在限流期间由主理人全盘接管完成）
+
+**发现并修复 1 个真问题**：
+- **接口返回的 URL 未做域名校验就带凭证请求**：`engine.js` 取 `/x/player/wbi/v2` 返回的
+  `subtitle_url` 后直接 `fetch(url, { credentials: 'include' })`，既没校验域名、
+  也没强制 https（`http://` 会**明文携带 Cookie**）。这等于"对任意可控 URL 发起带凭证请求"。
+  新增 `util.sanitizeBiliUrl()`：补 `https:`、强制 https、域名须在 B 站白名单内
+  （`bilibili.com`/`hdslb.com`/`biliapi.net`/`bilivideo.*`/`bilibili.tv`），
+  不在白名单则降级为 `credentials: 'omit'` 并告警。
+  仿冒域名（`bilibili.com.evil.com`、`evilbilibili.com`）已验证被正确拒绝。
+
+**已验证无问题（逐项排查，非抽查）**：
+| 检查项 | 结论 |
+|---|---|
+| `eval` / `new Function` / `document.write` / `insertAdjacentHTML` / 字符串定时器 | **全项目 0 处** |
+| XSS —— popup 内 3 处 innerHTML | 均用 `escapeHtml`（覆盖 `& < > " '`） |
+| XSS —— content.js 内 2 处 innerHTML | 均为**静态 SVG 字面量**，无插值 |
+| XSS —— dashboard | 一律 `textContent`，无 innerHTML 注入点 |
+| 路径穿越 | `../../etc/passwd` → `_.._etc_passwd`，`\` `/` 均替换 |
+| 消息来源校验 | `sender.id !== chrome.runtime.id`，拒绝其他扩展；无 `onMessageExternal` |
+| 权限最小化 | 无 `<all_urls>`、**无 `cookies` 权限**、无 `webRequestBlocking`、未声明 `externally_connectable` |
+| `host_permissions` | 仅 B 站相关域 |
+| 凭证发送范围 | API `include`；CDN 与封面 `omit` |
+
+**核心算法用官方向量核验**：
+- **AV/BV 转换**：3 个社区公认向量 + 1000 次往返 + 全部非法输入正确抛错 ✅
+- **MD5**：6 个 RFC 1321 向量 + UTF-8 ✅（原有测试已与 Node crypto 对拍，含分块边界与 1MB 随机二进制）
+- **WBI mixin key**：用 bilibili-API-collect 官方示例反推，`ea1db124af3c7062474693fa704f4ff8` 一致 ✅
+  （此前的"期望 w_rid 不匹配"是**我凭记忆写的常量错了**，实现本身自洽 —— 已手工核算确认，
+  且本会话大量真实 playurl 调用均返回 `code: 0`，若签名有误必然全 -403。
+  **没有**基于错误记忆去"修"正确代码。）
+
+**新增测试**：`test-security.mjs`（42 项安全不变量）+ `selftest-core.mjs` 补 WBI 段（6 项）。
+
+- **进度上报的 `range` 字段恒为 null**：`report()` 里先 `pendingRanges.splice(0)` 清空数组，
+  下一行再取 `pendingRanges[length-1]` 必然是 undefined。已改为**先取值再清空**
+  （实测修复后 `range` 正确为 `{"start":0,"end":2047}`）。
+- **MutationObserver 无节流**：监听 `document.body` 的 `childList+subtree`，在 B 站首页／
+  动态流这类页面每秒可触发上百次 DOM 变更，每次都同步跑 `new URL()` + 多条正则 + DOM 查询。
+  已改用 `requestAnimationFrame` 合并到**每帧最多一次**（约 16ms），开销降一个量级。
+- `lint-noundef.mjs` 补上 `requestAnimationFrame` 等浏览器全局（否则新的节流代码会被误报）。
+
+### 独立复核轮：发现我前一轮引入的 2 个回归（均已修）
+
+限流恢复后派了一路**独立验证者**复核本版本全部改动，结果抓到 3 个 P1 —— 其中 **2 个是我
+上一轮修 bug 时自己引入的**。这类"修复引入新缺陷"靠自查很难发现，独立复核是必要的。
+
+1. **取消无法中断"正在读 body"的请求**（我引入）：`doFetch` 把外部 signal 换成自建
+   controller，并在拿到响应头后移除外部监听 → 读 body 阶段与"用户取消"断开。
+   用户点了取消，大分片仍会把几十 MB 读完才停。
+   改为用 `AbortSignal.any([external, timeoutCtrl.signal])` **合并**两个 signal
+   （Chrome 116+，本扩展 min 版本正好是 116），中断贯穿 header 与 body 两阶段。
+2. **`rangeIgnored` 与"用户取消"仍会被重试**（我引入）：worker 里的"立即放弃"发生在
+   `retry()` **跑完之后**，而 `retry` 内部已经把全量文件重下了 `retries+1` 次
+   （8 分片 × retries 可达 24 次全量下载）。给 `retry()` 增加 `shouldRetry` 选项，
+   声明这两类错误不重试；取消时也不再白跑 sleep（retries=5 时原本要多拖约 15s）。
+3. **同会话内无法重复下载同一视频**（我引入）：`acceptPending` 的指纹去重只增不减，
+   于是下完一个视频后想"换个清晰度重下"会被**静默丢弃**（UI 什么都不出现）。
+   新增 `releaseSpecKey()`，任务进入终态或被清除时释放指纹。
+
+同时修：`chrome.action?.x?.().catch?.()` 这种写法并不安全 —— 可选链只短路左侧，
+若方法存在但返回 undefined（MV2 回调式 API 即是），`undefined.catch` 会抛 TypeError。
+改为显式判空 + try/catch。
+
+新增 `tools/test-downloader.mjs`（16 项）锁住以上语义：取消传播、不该重试的错误、
+rangeIgnored 不重复全量下载、`retry` 的 NaN 兜底。这些断言是**非空洞**的 ——
+在旧实现下"取消"会永久挂起，第一条断言即失败。
+
+### 决定**不**修的一项（说明理由）
+
+- **弹幕条数上限**：10 万条弹幕生成 ASS 约 2s 同步阻塞。加截断虽然能消除卡顿，
+  但会**静默丢失用户的弹幕数据** —— 用"可能掉数据"换 2 秒延迟不划算，且这 2s 发生在
+  本就很慢的保存阶段。保留为已知项，若将来改为分片/异步渲染再处理。
+
+### 已审查且无需改动
+
+- **`chapters.js`**：字段兼容（from/start/time、content/title/text）、毫秒与秒自动判别、
+  `end` 缺失时从下一条或总时长补全、WebVTT 头与时间格式 —— 均正确，已有 37 项测试覆盖。
+- **`nfo.js`**：先剥离控制字符再做 5 实体转义、刻意"先截断后转义"以避免在实体中间切断产出裸 `&`、
+  代理对处理、`Asia/Shanghai` 时区 —— 设计正确，已有 99 项测试覆盖。
+
+### 测试
+
+26 套件 / **734 项通过 / 0 失败**。新增 `test-danmaku.mjs`（23 项）、
+`test-subtitle.mjs`（29 项）、`test-security.mjs`（42 项）、
+`test-downloader.mjs`（16 项），并为 `selftest-core.mjs` 补上 WBI 段（6 项）。
+
+`lint-ci-coverage.mjs` 本轮**五次**发挥作用：依次抓出 `test-danmaku`、
+`test-subtitle`、`test-security`、`test-downloader` 都还没进工作流
+（此前它还抓出 `test-season.mjs` 从 v1.4.14 起从未在 CI 跑过）。
+这类"新增测试静默不执行"的遗漏，靠人肉 review 几乎必然漏掉。
+
+### 已知未处理（下轮）
+
+- `maxParallelTasks` 未在"逐个点开始"路径生效
+- 弹幕条数无上限（10 万条约 2s 同步阻塞主线程）
+- 滚动弹幕车道饱和后不丢弃（会堆叠）
+- `pendingRanges.splice(0)` 使上报的 `range` 恒为 null
+- MutationObserver 无节流（B 站首页高频 DOM 变动）
+
 ## [1.4.21] - 2026-09-20
 
 > 对 v1.4.20 做了一轮**对抗性复审**（独立 Agent 攻击 + 自查），又挖出 1 个 P0、4 个 P1、

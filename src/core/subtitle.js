@@ -9,7 +9,7 @@
  * 注意：字幕多为 AI 生成，需要登录后才能取到（need_login_subtitle）。
  */
 
-import { toAssTime, toSrtTime } from './util.js';
+import { toAssTime, toSrtTime, escapeAssText } from './util.js';
 
 /**
  * @param {any} json subtitle_url 返回的 JSON
@@ -24,14 +24,28 @@ export function parseSubtitleJson(json, meta = {}) {
       from: Number(it.from) || 0,
       to: Number(it.to) || 0,
       location: Number(it.location) || 2,
-      content: String(it.content ?? ''),
+      // ★ 折叠连续空行：SRT **以空行分隔块**，字幕文本里若含 "\n\n"
+      //   会被解析成两个块 → 整份 SRT 结构损坏（实测 3 条字幕产出 4 块，
+      //   块序变成 ["1","2","第二段","3"]）。单个换行是合法的多行字幕，保留。
+      content: String(it.content ?? '').replace(/\r?\n(\s*\r?\n)+/g, '\n').trim(),
     })),
   };
 }
 
+/**
+ * 归一化字幕文本，使其**可以安全地放进 SRT 块**。
+ *
+ * SRT 以**空行**分隔块。文本里若含连续换行（`\n\n`），会被解析器切成两个块
+ * → 整份 SRT 结构损坏（实测 3 条字幕产出 4 块，块序变成 ["1","2","第二段","3"]）。
+ * 单个换行是合法的多行字幕，保留。
+ */
+function normalizeSrtText(text) {
+  return String(text ?? '').replace(/\r?\n(\s*\r?\n)+/g, '\n').trim();
+}
+
 export function subtitleToSrt(subtitle) {
   return subtitle.items
-    .map((it, i) => `${i + 1}\n${toSrtTime(it.from)} --> ${toSrtTime(it.to)}\n${it.content}\n`)
+    .map((it, i) => `${i + 1}\n${toSrtTime(it.from)} --> ${toSrtTime(it.to)}\n${normalizeSrtText(it.content)}\n`)
     .join('\n');
 }
 
@@ -82,12 +96,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return bestOverlap > 0 ? best : null;
   };
 
+  // ★ 字幕文本必须转义（与弹幕同规格，共用 util.escapeAssText）。
+  // ASS 里 { } \ 是控制字符、物理换行会把 Dialogue 事件行切断 ——
+  // 不转义会产出结构损坏的 ASS。
   const lines = subtitle.items.map((it) => {
+    const content = escapeAssText(it.content);
     const pair = findSecondary(it);
     if (pair) {
-      return `Dialogue: 0,${toAssTime(it.from)},${toAssTime(it.to)},Default,,0,0,0,,${it.content}\nDialogue: 1,${toAssTime(it.from)},${toAssTime(it.to)},Secondary,,0,0,0,,${pair.content}`;
+      const second = escapeAssText(pair.content);
+      return `Dialogue: 0,${toAssTime(it.from)},${toAssTime(it.to)},Default,,0,0,0,,${content}\nDialogue: 1,${toAssTime(it.from)},${toAssTime(it.to)},Secondary,,0,0,0,,${second}`;
     }
-    return `Dialogue: 0,${toAssTime(it.from)},${toAssTime(it.to)},Default,,0,0,0,,${it.content}`;
+    return `Dialogue: 0,${toAssTime(it.from)},${toAssTime(it.to)},Default,,0,0,0,,${content}`;
   });
 
   return header + lines.join('\n') + '\n';
@@ -97,10 +116,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 export function pickSubtitle(subtitles, preferLan = 'zh-CN') {
   if (!subtitles?.length) return null;
   const score = (s) => {
+    const lan = String(s.lan || '');
+    const doc = String(s.lan_doc || '');
     let n = 0;
-    if (s.lan === preferLan) n += 100;
-    if (String(s.lan).startsWith('zh')) n += 50;
-    if (!/ai/i.test(s.lan) && !/自动/.test(s.lan_doc || '')) n += 20;
+    if (lan === preferLan) n += 100;
+    // ★ 中文判定不能只看 `startsWith('zh')`：B 站 **AI 中文字幕的 lan 是 `ai-zh`**，
+    //   它不以 zh 开头，旧逻辑因此拿不到任何中文加成 —— 视频若同时有
+    //   `ai-zh` 与 `en-US`，默认偏好 zh-CN 时两者同分，谁在数组前面谁赢，
+    //   用户"偏好中文"的设置等于失效。改为"含 zh"判定，覆盖 ai-zh / zh-CN / zh-Hans。
+    if (/zh/i.test(lan) || /中文|Chinese/i.test(doc)) n += 50;
+    // 人工字幕优于 AI 字幕
+    if (!/ai/i.test(lan) && !/自动/.test(doc)) n += 20;
     if (s.type === 0 || s.type === undefined) n += 5;
     return n;
   };

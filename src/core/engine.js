@@ -26,7 +26,7 @@ import { parseViewPoints, chaptersToTxt, chaptersToVtt } from './chapters.js';
 import { buildNfo, nfoFilename } from './nfo.js';
 import { buildFilename, buildVars } from './settings.js';
 import { qualityShort } from './quality.js';
-import { sanitizeFilename, log, warn } from './util.js';
+import { sanitizeFilename, log, warn, sanitizeBiliUrl } from './util.js';
 
 /** @typedef {'pending'|'resolving'|'downloading'|'muxing'|'saving'|'done'|'error'|'canceled'} TaskStatus */
 
@@ -635,8 +635,25 @@ export class DownloadEngine {
       ? memorySource(new Uint8Array(await aSink.blob().arrayBuffer()))
       : blobSource(await aSink.file());
 
+    // ★ 必须**真的截断**目标文件，不能只把 size 归零。
+    //
+    // createOutput 是用 `keepExistingData: true` 打开的目标文件，所以同名文件
+    // 二次下载、或上次失败留下过字节时，只 `size = 0` 而**不截断**的话：
+    // 新内容更短 → 尾部残留上一轮的字节 → 产物 = 新 moov + 旧 mdat 尾巴，
+    // 文件长度对不上、MP4 结构损坏（能播但花屏/时长错，或直接打不开）。
+    //
+    // 这与 engine.js 顶部 resetSink() 用 truncate(0) 是同一类问题
+    // —— 覆盖写不会缩短文件，必须显式截断。
     const writeSink = out.sink;
-    if (writeSink instanceof FileHandleSink) writeSink.size = 0;
+    if (writeSink instanceof FileHandleSink) {
+      writeSink.size = 0;
+      try {
+        // 此时 writable 还开着（finishOutput 里才 close），truncate 有效
+        if (typeof writeSink.truncate === 'function') await writeSink.truncate(0);
+      } catch (err) {
+        warn('合并前截断目标文件失败（可能残留旧字节）', err?.message);
+      }
+    }
 
     const result = await mergeDashStream({
       videoSource: vSource,
@@ -676,6 +693,9 @@ export class DownloadEngine {
       total = p.size;
     }
     const concurrency = Math.max(1, Math.min(16, this.settings.concurrency || 8));
+    // 每个地址的额外重试次数。旧实现里 downloader 把它硬编码成 2，
+    // 设置页的「失败重试次数」从来没人读 —— 用户调了没反应（v1.4.22 修复）。
+    const retries = Number(this.settings.retries);
 
     /** 已完成的区间（续传时非空） */
     let doneRanges = resume && resume.ranges ? [...resume.ranges] : [];
@@ -692,6 +712,7 @@ export class DownloadEngine {
         writeOffset,
         sink,
         concurrency,
+        retries,
         signal,
         onProgress: (p) => {
           // 分片完成时增量记录：p 里带 range 就记一段
@@ -740,6 +761,7 @@ export class DownloadEngine {
               writeOffset,
               sink,
               concurrency,
+              retries,
               signal,
               onProgress,
               probe,
@@ -866,9 +888,15 @@ export class DownloadEngine {
         const info = playerInfo;
         const subs = info?.subtitle?.subtitles || [];
         const target = pickSubtitle(subs, settings.subtitleLan);
-        if (target?.subtitle_url) {
-          const url = target.subtitle_url.startsWith('//') ? `https:${target.subtitle_url}` : target.subtitle_url;
-          const res = await fetch(url, { credentials: 'include' });
+          if (target?.subtitle_url) {
+            // ★ 字幕 URL 来自接口数据，必须过白名单再决定要不要带凭证。
+            // 旧实现直接 `fetch(url, { credentials: 'include' })`，既没校验域名
+            // （可对任意可控 URL 发带 Cookie 请求），也没强制 https
+            // （`http://` 会明文带凭证）。见 util.sanitizeBiliUrl。
+            const { url, safe, reason } = sanitizeBiliUrl(target.subtitle_url);
+            if (!url) throw new Error(`字幕地址无效：${reason || '未知原因'}`);
+            if (!safe) warn('字幕地址不在 B 站域名白名单内，已改为不带凭证请求', reason);
+            const res = await fetch(url, { credentials: safe ? 'include' : 'omit' });
           const json = await res.json();
           const parsed = parseSubtitleJson(json, { lan: target.lan, lanDoc: target.lan_doc });
           const format = settings.subtitleFormat || 'srt';
