@@ -292,5 +292,47 @@ console.log('\n[11] MemorySink 的空洞 / 重叠 / 乱序（续传正确性依�
   }
 }
 
+console.log('\n[6] ★ 暂停 vs 取消：唯一区别是"清不清续传清单"');
+{
+  const { Task } = await import('../src/core/engine.js');
+
+  // 暂停：置意图标记 + 中断，清单由 engine 保留
+  {
+    const t = new Task({ bvid: 'BV1', cid: 1 });
+    ok('初始 paused=false', t.paused === false);
+    ok('初始未取消', t.canceled === false);
+    t.pause();
+    ok('pause() 置起 paused 标记', t.paused === true);
+    ok('pause() 确实中断了任务', t.canceled === true);
+  }
+
+  // 取消：必须把 paused 打回 false，否则"先暂停再取消"会被当成暂停、清单被留下
+  {
+    const t = new Task({ bvid: 'BV1', cid: 1 });
+    t.pause();
+    ok('先暂停过', t.paused === true);
+    t.cancel();
+    ok('★ 取消会把 paused 打回 false（否则取消变成暂停，清单被误留）', t.paused === false);
+    ok('取消同样中断了任务', t.canceled === true);
+  }
+
+  // 反向：先取消再暂停
+  {
+    const t = new Task({ bvid: 'BV1', cid: 1 });
+    t.cancel();
+    t.pause();
+    ok('先取消再暂停 → 以暂停为准', t.paused === true);
+  }
+
+  // 每个任务都要有自己的续传 key 容器，不能共用同一个数组
+  {
+    const a = new Task({ bvid: 'BV1', cid: 1 });
+    const b = new Task({ bvid: 'BV2', cid: 2 });
+    a.resumeKeys.push('k-a');
+    ok('★ 两个任务的 resumeKeys 互相独立', b.resumeKeys.length === 0,
+      `b 里混进了 ${JSON.stringify(b.resumeKeys)}`);
+  }
+}
+
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 断点续传逻辑自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);
 process.exit(fail === 0 ? 0 : 1);

@@ -90,20 +90,27 @@ export class FileHandleSink {
    * 保证不会出现「写一半被另一个分片插入」的情况；网络下载本身仍然是并发的。
    */
   writeAt(offset, bytes) {
-    this._chain = this._chain.then(async () => {
+    const task = this._chain.then(async () => {
       await this.writable.write({ type: 'write', position: offset, data: bytes });
       this.size = Math.max(this.size, offset + bytes.length);
     });
-    return this._chain;
+    // ★ 绝不能把 rejected 的 promise 直接赋回 _chain —— 那会**永久毒化**整条链：
+    //   之后每次 writeAt 都是在 rejected 上 .then，回调被跳过、立刻 reject，
+    //   表现为"一次写失败 → 这个文件再也写不进去任何字节"。
+    //   这里让链自身吞掉错误（后续写入照常排队），而把真实的 task 返回给调用方 await，
+    //   这样"失败只影响它自己"和"调用方能感知失败"两者都保住。
+    this._chain = task.catch(() => {});
+    return task;
   }
 
   /** 顺序追加写（混流输出用）。 */
   write(bytes) {
-    this._chain = this._chain.then(async () => {
+    const task = this._chain.then(async () => {
       await this.writable.write({ type: 'write', position: this.size, data: bytes });
       this.size += bytes.length;
     });
-    return this._chain;
+    this._chain = task.catch(() => {}); // 同上：不让单次失败毒化整条链
+    return task;
   }
 
   /**

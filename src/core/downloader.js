@@ -102,11 +102,96 @@ const DEFAULT_CONCURRENCY = 8;
 const MIN_CHUNK = 512 * 1024;
 const MAX_CHUNK = 16 * 1024 * 1024;
 
+/**
+ * 读取响应体时的**停滞判定阈值**（毫秒）：距上一次收到字节超过这么久、
+ * 一个字节都没再进来，就判定这条连接被"滴灌"了。
+ *
+ * 为什么必须单独设一道：doFetch 的 REQUEST_TIMEOUT_MS 只计到**响应头**。
+ * 服务端一旦先痛快地回了头、然后开始每秒挤几 KB，那个超时早就清掉了 ——
+ * 这一片会**无限期地读下去**，而其余分片早已下完，于是总进度卡在最后几个百分点。
+ *
+ * 用户描述的「后半段被限速」，绝大多数就是这一片在拖：不是真的被限了速，
+ * 是我们没有兜住"连接活着但不给数据"这种状态。
+ *
+ * 注意判定条件是"零字节"而不是"速度低于某值"——后者会误杀弱网下的正常大分片。
+ */
+const STALL_TIMEOUT_MS = 15_000;
+
 export class DownloadAborted extends Error {
   constructor() {
     super('下载已取消');
     this.name = 'DownloadAborted';
   }
+}
+
+/**
+ * 带停滞检测的响应体读取。
+ *
+ * 逐块读，每收到一块就续一次命；`stallMs` 内零字节则主动放弃并**关掉 reader**
+ * （不关的话这条连接会一直挂着，白占并发额度）。
+ *
+ * @param {Response} res
+ * @param {{ stallMs?: number, signal?: AbortSignal }} [opts]
+ * @returns {Promise<Uint8Array>}
+ */
+export async function readBody(res, { stallMs = STALL_TIMEOUT_MS, signal } = {}) {
+  // 没有流式 body 就退回一次性读取（测试桩 / 非标准环境）。
+  // 真实浏览器的 fetch Response 一定有 body.getReader，走不到这条分支。
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    return new Uint8Array(await res.arrayBuffer());
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+
+  /** 外部取消：把 abort 事件转成 reject，让 race 立刻结束并走到 reader.cancel()。 */
+  const abortPromise = signal && typeof signal.addEventListener === 'function'
+    ? new Promise((_resolve, reject) => {
+        if (signal.aborted) {
+          reject(new DownloadAborted());
+          return;
+        }
+        signal.addEventListener('abort', () => reject(new DownloadAborted()), { once: true });
+      })
+    : null;
+
+  try {
+    for (;;) {
+      let timer = null;
+      const timeout = new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const err = new Error(`读取停滞：${stallMs}ms 内没有收到任何字节`);
+          err.stalled = true;
+          reject(err);
+        }, stallMs);
+      });
+      const racers = abortPromise ? [reader.read(), timeout, abortPromise] : [reader.read(), timeout];
+      let step;
+      try {
+        step = await Promise.race(racers);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      const { done, value } = step;
+      if (done) break;
+      if (value && value.length) {
+        chunks.push(value);
+        total += value.length;
+      }
+    }
+  } catch (err) {
+    // 停滞 / 取消 / 读错误都要把 reader 关掉，否则连接会一直挂着
+    try { await reader.cancel(); } catch { /* ignore */ }
+    throw err;
+  }
+
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
 }
 
 /**
@@ -320,8 +405,10 @@ export async function downloadRanged({
     if (res.status !== 206 && res.status !== 200) {
       throw httpError(res);
     }
-    const buf = await res.arrayBuffer();
-    const bytes = new Uint8Array(buf);
+    // ★ 不能用 `await res.arrayBuffer()`：那会一路读到天荒地老，
+    //   服务端"滴灌"时没有任何机制把它叫停（响应头超时早在拿到头时就清了）。
+    //   readBody 有停滞检测，零字节超过 STALL_TIMEOUT_MS 就放弃，交给重试换连接。
+    const bytes = await readBody(res, { signal: workerSignal });
     const expected = range.end - range.start + 1;
 
     if (res.status === 206) {
@@ -352,7 +439,23 @@ export async function downloadRanged({
     );
   };
 
-  const worker = async () => {
+  /**
+   * 地址轮换开关 + 备用地址失败计数。
+   *
+   * ★ 为什么要轮换：默认 8 个 worker **全部打 list[0]**，
+   *   backupUrls 只当故障切换用、从不参与负载均衡。于是 8 路并发全挤在同一个
+   *   CDN 主机上（HTTP/2 下更是共用一条 TCP 连接的拥塞窗口），
+   *   既拿不到多主机的聚合带宽，也把单主机的限速/配额压力全部集中在一处。
+   *   让第 i 个 worker 从 `list[i % list.length]` 起跳，就能把 8 路摊开。
+   *
+   * ★ 为什么要能关掉：`backupUrls` 的签参不保证完整（engine.refreshUrls 的注释
+   *   就写着"只回主源即可：backupUrls 未必带签参"）。一旦备用地址连续失败，
+   *   继续轮换只会给每个分片都白搭几次失败尝试 —— 这时退回"所有人都打主地址"。
+   */
+  let rotate = list.length > 1;
+  let backupFailures = 0;
+
+  const worker = async (workerIndex = 0) => {
     for (;;) {
       throwIfAborted();
       const index = cursor++;
@@ -360,8 +463,10 @@ export async function downloadRanged({
       const range = ranges[index];
 
       let lastError;
-      // 依次尝试主地址与备用地址，每个地址内部再重试 `retries` 次（见 attemptsPerUrl）
-      for (const url of list) {
+      // 依次尝试主地址与备用地址（从自己那个起跳），每个地址内部再重试 `retries` 次
+      const startAt = rotate ? workerIndex % list.length : 0;
+      for (let k = 0; k < list.length; k++) {
+        const url = list[(startAt + k) % list.length];
         try {
           // 两类错误**不重试**：
           //   - DownloadAborted（用户取消）：已取消还要跑满次数并 sleep 是纯延迟
@@ -390,6 +495,8 @@ export async function downloadRanged({
           // 服务器不支持 Range：分片下载这条路走不通，立即放弃。
           // 继续重试/换备用地址只会把整个文件重复下载一遍又一遍。
           if (err?.rangeIgnored) throw err;
+          // 备用地址连续失败 → 关掉轮换（多半是缺签参），退回主地址
+          if (url !== list[0] && ++backupFailures >= 2) rotate = false;
           lastError = err;
         }
       }
@@ -403,7 +510,7 @@ export async function downloadRanged({
     }
   };
 
-  const workers = Array.from({ length: Math.min(concurrency, ranges.length) }, () => worker());
+  const workers = Array.from({ length: Math.min(concurrency, ranges.length) }, (_unused, i) => worker(i));
   await Promise.all(workers);
   report(true);
   return { bytes: downloaded, elapsed: (performance.now() - startedAt) / 1000, size };

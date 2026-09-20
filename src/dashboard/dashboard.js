@@ -48,6 +48,12 @@ function ensureNode(task) {
   $('taskList').appendChild(el);
 
   el.querySelector('.act-start').addEventListener('click', () => startTask(task));
+  // 暂停：中断但**保留**续传清单，任务停在 paused，可原地「继续」。
+  el.querySelector('.act-pause').addEventListener('click', () => pauseTask(task));
+  // 继续：从断点接着下（续传清单还在时）或从头下（清单已失效时）
+  el.querySelector('.act-resume').addEventListener('click', () => {
+    resumeTask(task).catch((e) => showToast(e?.message || String(e)));
+  });
   el.querySelector('.act-cancel').addEventListener('click', () => {
     task.cancel();
     showToast('已请求取消');
@@ -84,9 +90,17 @@ function ensureNode(task) {
     showToast(task.outputs.map((o) => o.path).join('、') || '无输出文件');
   });
   el.querySelector('.act-remove').addEventListener('click', () => {
+    // 移除一个「已暂停」的任务 = 用户放弃这次续传 → 必须把清单和 .part 一起删掉，
+    // 否则它会永久占着 OPFS，且下次同一视频可能续到这份残缺数据上。
+    if (task.status === 'paused') {
+      task.paused = false;
+      engine.discardResume(task).catch(() => {});
+    }
     el.remove();
     nodes.delete(task.id);
     engine.tasks = engine.tasks.filter((t) => t.id !== task.id);
+    // 清掉任务时也要释放指纹，否则这个视频在本会话内再也下不了
+    releaseSpecKey(task);
     updateCounts();
     persistHistory();
   });
@@ -98,6 +112,7 @@ const STATUS_TEXT = {
   pending: '等待中',
   resolving: '解析中',
   downloading: '下载中',
+  paused: '已暂停',
   muxing: '合并中',
   saving: '保存中',
   done: '已完成',
@@ -109,6 +124,7 @@ const STATUS_CLASS = {
   pending: 'bd-badge',
   resolving: 'bd-badge bd-badge--blue',
   downloading: 'bd-badge bd-badge--blue',
+  paused: 'bd-badge bd-badge--warn',
   muxing: 'bd-badge bd-badge--pink',
   saving: 'bd-badge bd-badge--pink',
   done: 'bd-badge bd-badge--ok',
@@ -119,9 +135,17 @@ const STATUS_CLASS = {
 function renderTask(task) {
   const el = ensureNode(task);
   el.dataset.status = task.status;
+  // ★ 「暂停」按钮只在开启断点续传时才有意义。
+  //
+  // 续传关闭时暂停 = 中断即丢弃（没有清单可留），点了「继续」就是从 0 重下，
+  // 那是在骗用户。所以这里把开关状态写进 data-resume，由 CSS 决定按钮显隐：
+  //   [data-status='downloading'][data-resume='1'] .act-pause { display: inline-flex }
+  // 不用 el.querySelector(...).hidden —— 作者样式表里的 display:inline-flex
+  // 优先级高于 UA 的 [hidden]{display:none}，设 hidden 是无效的。
+  el.dataset.resume = settings?.resumeEnabled ? '1' : '0';
   el.className = `task${['resolving', 'downloading', 'muxing', 'saving'].includes(task.status) ? ' is-running' : ''}${
-    task.status === 'done' ? ' is-done' : ''
-  }${task.status === 'error' ? ' is-error' : ''}`;
+    task.status === 'paused' ? ' is-paused' : ''
+  }${task.status === 'done' ? ' is-done' : ''}${task.status === 'error' ? ' is-error' : ''}`;
 
   el.querySelector('.t-name').textContent = task.title || task.filename || '未命名任务';
   el.querySelector('.t-sub').textContent = [
@@ -223,26 +247,13 @@ async function prunePendingTask(task) {
   }
 }
 
-async function startTask(task) {
-  if (task.status !== 'pending' && task.status !== 'error' && task.status !== 'canceled') return;
-
-  // ★ 尊重「同时下载的任务数」设置。
-  //
-  // 旧实现这里**完全没有检查** runningCount —— 于是逐个点「开始」时想跑几个跑几个，
-  // 而 maxParallelTasks 只对「全部开始」生效。用户设了 2 却同时跑 5 个，
-  // 会以为这个设置坏了。
-  //
-  // 这里不能像 pump() 那样自动排队：ask 模式下每个任务都要用户选保存位置，
-  // 没有 destination 就没法自动启动。所以给出明确提示，让用户等槽位空出来。
-  const maxParallel = Math.max(1, settings.maxParallelTasks || 2);
-  if (runningCount >= maxParallel) {
-    showToast(`已有 ${runningCount} 个任务在进行中（上限 ${maxParallel}），请等其中一个完成后再开始`);
-    return;
-  }
-
-  const destination = await pickDestination(1);
-  if (!destination) return;
-
+/**
+ * 运行一个任务并维护全局计数 / 持久化 / 队列泵。
+ *
+ * 「开始」「继续」「重试」三条路径共用它，避免把 finally 里的收尾逻辑复制三份
+ * （复制三份的下场就是其中一份漏改 —— 本项目已经因此踩过好几次）。
+ */
+async function runTracked(task, destination) {
   task.lastDestination = destination;
   runningCount += 1;
   updateCounts();
@@ -256,8 +267,10 @@ async function startTask(task) {
     // pendingTasks 条目清掉。否则用户取消后关掉下载中心再打开，
     // 那个已取消的任务会被重新入队（用户以为自己取消成功了）。
     await prunePendingTask(task);
-    // 释放指纹：允许同一会话内再次下载这个视频（例如换个清晰度重下）
-    releaseSpecKey(task);
+    // 释放指纹：允许同一会话内再次下载这个视频（例如换个清晰度重下）。
+    // ★ paused **不释放** —— 它还留在列表里等着被「继续」，此时若放行同名派发
+    //   会建出第二个同内容任务，继续时两路写同一个 .part，文件必坏。
+    if (task.status !== 'paused') releaseSpecKey(task);
     if (task.status === 'done' && settings.notifyOnComplete) {
       showToast(`已完成：${task.filename || task.title}`);
       // 下载中心在**后台标签页**时，页面内的 toast 用户根本看不到。
@@ -280,6 +293,124 @@ async function startTask(task) {
     }
     pump();
   }
+}
+
+/** 并发槽位是否已满。满则返回提示文案，否则返回 ''。 */
+function slotBusyMessage() {
+  const maxParallel = Math.max(1, settings.maxParallelTasks || 2);
+  // ★ 尊重「同时下载的任务数」设置。
+  //
+  // 旧实现这里**完全没有检查** runningCount —— 于是逐个点「开始」时想跑几个跑几个，
+  // 而 maxParallelTasks 只对「全部开始」生效。用户设了 2 却同时跑 5 个，
+  // 会以为这个设置坏了。
+  //
+  // 这里不能像 pump() 那样自动排队：ask 模式下每个任务都要用户选保存位置，
+  // 没有 destination 就没法自动启动。所以给出明确提示，让用户等槽位空出来。
+  if (runningCount >= maxParallel) {
+    return `已有 ${runningCount} 个任务在进行中（上限 ${maxParallel}），请等其中一个完成后再试`;
+  }
+  return '';
+}
+
+async function startTask(task) {
+  if (task.status !== 'pending' && task.status !== 'error' && task.status !== 'canceled') return;
+  const busy = slotBusyMessage();
+  if (busy) {
+    showToast(busy);
+    return;
+  }
+  const destination = await pickDestination(1);
+  if (!destination) return;
+  await runTracked(task, destination);
+}
+
+/**
+ * 暂停一个正在下载的任务。
+ *
+ * 与「取消」的区别只有一句：暂停保留续传清单，取消丢弃它（见 engine.discardResume）。
+ * 因此这里只置意图标记并 abort，真正的状态落定在 engine.run 的 catch 里。
+ *
+ * 只有 `downloading` 阶段提供暂停（按钮由 CSS 按 data-status 控制）：
+ *  - resolving：还没产生任何字节，暂停没有意义
+ *  - muxing / saving：中断会产出半截文件，只能取消
+ */
+function pauseTask(task) {
+  if (task.status !== 'downloading') {
+    showToast('只有下载中阶段可以暂停');
+    return;
+  }
+  task.pause();
+  showToast('正在暂停…（等待在途分片收尾）');
+}
+
+/**
+ * 校验（必要时重新申请）一个目录/文件句柄的写权限。
+ *
+ * 为什么必须查：File System Access API 的句柄**跨会话不自动恢复授权** ——
+ * 页面刷新或浏览器重启后，`queryPermission` 会返回 'prompt'，
+ * 此时直接 createWritable() 会抛 NotAllowedError。
+ * 而 requestPermission 必须在**用户手势**里调用，所以只能放在按钮点击链路上。
+ */
+async function ensurePermission(handle, mode = 'readwrite') {
+  if (!handle || typeof handle.queryPermission !== 'function') return false;
+  try {
+    const opts = { mode };
+    let state = await handle.queryPermission(opts);
+    if (state === 'granted') return true;
+    if (state === 'prompt' && typeof handle.requestPermission === 'function') {
+      state = await handle.requestPermission(opts);
+    }
+    return state === 'granted';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 决定「继续」时要往哪里写。
+ *
+ * 优先复用上一轮的保存位置：暂停后每次都重新弹文件选择器会让「继续」变得
+ * 比「取消重下」还麻烦，用户就不会用这个功能了。
+ * 句柄失效（最常见是跨会话未授权）时才退回让用户重选，并说明原因。
+ */
+async function resolveDestination(task) {
+  const prev = task.lastDestination;
+  if (!prev || prev.kind === 'downloads') return { kind: 'downloads' };
+  const handle = prev.kind === 'dir' ? prev.dir : prev.handle;
+  if (!handle) return pickDestination(1);
+  if (await ensurePermission(handle, 'readwrite')) return prev;
+  showToast('保存位置的授权已失效，请重新选择');
+  return pickDestination(1);
+}
+
+/** 继续一个已暂停的任务。 */
+async function resumeTask(task) {
+  if (task.status !== 'paused') return;
+  const busy = slotBusyMessage();
+  if (busy) {
+    showToast(busy);
+    return;
+  }
+
+  const destination = await resolveDestination(task);
+  // null = 用户在保存位置选择器里点了取消。此时**保持 paused**，
+  // 不能把状态改成 canceled —— 用户只是还没决定存哪，不是要放弃。
+  if (!destination) return;
+
+  // 重置运行态字段，但**保留** downloadedBytes / totalBytes / progress：
+  // 保留它们，进度条才会从断点接着走，而不是先跳回 0 吓用户一跳。
+  task.paused = false;
+  task.controller = new AbortController();
+  task.status = 'pending';
+  task.error = '';
+  task.errorMessage = '';
+  task.phaseText = '';
+  task.speed = 0;
+  task.eta = Infinity;
+  task.finishedAt = 0;
+  task.outputs = [];
+  renderTask(task);
+  await runTracked(task, destination);
 }
 
 async function startAll() {
@@ -467,6 +598,9 @@ async function init() {
   onSettingsChanged((patch) => {
     settings = { ...settings, ...patch };
     engine.updateSettings(settings);
+    // 「断点续传」开关直接决定「暂停」按钮显隐（写在 data-resume 上），
+    // 所以设置一变就要把所有任务卡重渲染一遍，否则按钮状态是旧的。
+    for (const t of engine.tasks) renderTask(t);
   });
 
   $('saveMode').value = settings.saveMode;
@@ -484,6 +618,16 @@ async function init() {
     showToast('临时文件已清理');
   });
   $('btnStartAll').addEventListener('click', () => startAll().catch((e) => showToast(e.message)));
+  $('btnPauseAll').addEventListener('click', () => {
+    let n = 0;
+    for (const t of engine.tasks) {
+      if (t.status === 'downloading') {
+        t.pause();
+        n += 1;
+      }
+    }
+    showToast(n ? `已暂停 ${n} 个任务（保留断点，可逐个点「继续」）` : '没有正在下载的任务');
+  });
   $('btnCancelAll').addEventListener('click', () => {
     let n = 0;
     for (const t of engine.tasks) {

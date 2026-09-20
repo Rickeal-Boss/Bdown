@@ -76,6 +76,48 @@ export function canResume(meta, expectedSize, { ttlMs = RESUME_TTL_MS, now = Dat
 }
 
 /**
+ * 纯函数：拿到一份清单后，决定这一轨该怎么续。
+ *
+ * 单独抽出来是因为 OPFS 行为在 CI 里没法验证，而"该不该续、续哪些区间"
+ * 是**完全确定**的逻辑，必须 100% 覆盖 —— 判断错一次的代价是把一份
+ * 已经下完的 .part 抹掉重下，或者续到一份残缺数据上。
+ *
+ * @param {object|null} meta 清单（来自 ResumeStore.read）
+ * @param {number} realSize 这一轨的真实总字节数
+ * @returns {{ kind: 'complete'|'partial'|'fresh', ranges: {start:number,end:number}[], reason: string }}
+ *   complete —— 清单显示**已经下完**：直接跳过下载（ranges = 全量）
+ *   partial  —— 可以续：ranges 是已完成区间（半开 [start, end)）
+ *   fresh    —— 不能续：调用方必须 truncate(0) 从头下
+ */
+export function planResume(meta, realSize, { ttlMs = RESUME_TTL_MS, now = Date.now() } = {}) {
+  const size = Number(realSize);
+  if (!Number.isFinite(size) || size <= 0) {
+    return { kind: 'fresh', ranges: [], reason: 'realSize 非法' };
+  }
+
+  // ★ complete 必须**先于** canResume 判定。
+  //
+  // canResume 的契约是「已完成字节 < 总字节才算可续」，所以**下完的轨它一律判 false**。
+  // 只依赖它的话，已完成的轨会掉进 fresh 分支被 truncate(0) 整个抹掉重下。
+  //
+  // 合并模式下这是必现场景：视频轨先下完、音频轨下到一半时暂停 →
+  // 继续时视频轨本该直接跳过，却会被重下整份，续传等于没生效。
+  // （前提：fetchTo 成功时写"全量区间"清单而不是 clear，见 engine.markTrackComplete。）
+  if (meta && Number(meta.size) === size) {
+    const ranges = mergeRanges(meta.ranges);
+    if (ranges.length && completedBytes(ranges) >= size) {
+      // 返回一个"全量已完成"的区间：downloadRanged 会算出 0 个缺口、
+      // 起 0 个 worker 直接返回，一个字节都不用再下。
+      return { kind: 'complete', ranges: [{ start: 0, end: size }], reason: '' };
+    }
+  }
+
+  const verdict = canResume(meta, size, { ttlMs, now });
+  if (!verdict.ok) return { kind: 'fresh', ranges: [], reason: verdict.reason };
+  return { kind: 'partial', ranges: mergeRanges(meta.ranges), reason: '' };
+}
+
+/**
  * OPFS -backed 续传仓库。
  */
 export class ResumeStore {
@@ -170,8 +212,9 @@ export class ResumeStore {
     } catch { /* ignore */ }
 
     const meta = await this.read(key);
-    const verdict = canResume(meta, realSize, { ttlMs: this.ttlMs });
-    if (!verdict.ok) {
+    const plan = planResume(meta, realSize, { ttlMs: this.ttlMs });
+
+    if (plan.kind === 'fresh') {
       // ★ 不能续传时必须**真的截断** .part 文件。
       //
       // 只返回 `ranges: []` 而不截断的话：调用方（engine.prepareStage → fetchTo）
@@ -185,6 +228,14 @@ export class ResumeStore {
       }
       return { sink, ranges: [], resumed: false };
     }
-    return { sink, ranges: mergeRanges(meta.ranges), resumed: true };
+    const ranges = plan.ranges;
+    // ★ 必须把已续上的字节数回填给 sink.size。
+    //
+    // FileHandleSink 的 size 只在 writeAt 时按 `max(size, offset+len)` 增长，
+    // 而续传跳过已完成的区间时**根本不会 writeAt**，于是 size 还是 0。
+    // 上层（engine.refreshProgress）正是拿 `staging.video.size` 算进度的 ——
+    // 不回填的话，续传后进度条会先退回到 0 再慢慢涨回去，看起来像"重新开始下了"。
+    sink.size = completedBytes(ranges);
+    return { sink, ranges, resumed: true };
   }
 }

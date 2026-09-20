@@ -36,6 +36,7 @@
         <input type="checkbox" id="rememberDir" /><span>批量保存到同一文件夹</span>
       </label>
       <button id="btnStartAll" class="bd-btn bd-btn--primary bd-btn--sm">全部开始</button>
+      <button id="btnPauseAll" class="bd-btn bd-btn--sm" title="暂停所有正在下载的任务（保留断点，可稍后继续）">全部暂停</button>
       <button id="btnCancelAll" class="bd-btn bd-btn--sm">全部取消</button>
       <button id="btnClearDone" class="bd-btn bd-btn--sm">清除已完成</button>
     </div>
@@ -67,6 +68,8 @@
       </div>
       <div class="task-actions">
         <button class="bd-btn bd-btn--sm act-start">开始</button>
+        <button class="bd-btn bd-btn--sm act-pause">暂停</button>
+        <button class="bd-btn bd-btn--sm act-resume">继续</button>
         <button class="bd-btn bd-btn--sm act-cancel">取消</button>
         <button class="bd-btn bd-btn--sm act-retry">重试</button>
         <button class="bd-btn bd-btn--sm act-open">打开文件</button>

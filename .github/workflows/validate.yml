@@ -35,6 +35,13 @@ jobs:
       - name: 下载器不变量自检（取消传播 / 重试语义 / rangeIgnored）
         run: node tools/test-downloader.mjs
 
+      # 「下载后半段变慢」的两个结构性根因：
+      #   1. 响应体读取无超时 —— 服务端滴灌时单片永久挂住（doFetch 的超时只到响应头）
+      #   2. 8 路并发全打 list[0]，backupUrls 从不参与负载均衡
+      # 另锁 sink 写入链不得被单次失败毒化。
+      - name: 停滞检测与地址轮换自检（body 读超时 / 多地址分摊 / 写入链不毒化）
+        run: node tools/test-stall-rotation.mjs
+
       - name: 断点续传逻辑自检（区间合并 / 缺失计算 / 续传集成）
         run: node tools/test-resume.mjs
 

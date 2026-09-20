@@ -6,7 +6,7 @@
  *
  * 运行：node tools/test-resume-store.mjs
  */
-import { resumeKey, canResume, RESUME_TTL_MS } from '../src/core/resume-store.js';
+import { resumeKey, canResume, planResume, RESUME_TTL_MS } from '../src/core/resume-store.js';
 
 let pass = 0;
 let fail = 0;
@@ -90,6 +90,41 @@ console.log('\n[2] canResume — 清单校验');
   // 重叠区间会被 mergeRanges 归一，不应误判
   const overlap = { size, ranges: [{ start: 0, end: 300 }, { start: 200, end: 500 }], updatedAt: NOW };
   ok('重叠区间归一化后仍可续传', canResume(overlap, size, { now: NOW }).ok);
+}
+
+console.log('\n[3] planResume — ★ 已下完的轨必须判 complete，不能判 fresh');
+{
+  const size = 1000;
+  // 这是「合并模式 + 暂停/继续」的必现场景：
+  // 视频轨已下完（fetchTo 写了全量区间清单），音频轨下到一半时暂停。
+  // 继续时视频轨必须被认成 complete —— 判成 fresh 的话 openPartial 会
+  // truncate(0) 把整份 .part 抹掉重下，续传等于完全没生效。
+  const full = planResume({ size, ranges: [{ start: 0, end: size }], updatedAt: NOW }, size, { now: NOW });
+  ok('全量清单 → complete', full.kind === 'complete', `实际 ${full.kind}（${full.reason}）`);
+  ok('complete 给出全量区间', full.ranges.length === 1 && full.ranges[0].start === 0 && full.ranges[0].end === size,
+    JSON.stringify(full.ranges));
+  ok('★ complete 绝不能是 fresh（fresh 会 truncate 掉已下完的数据）', full.kind !== 'fresh', full.reason);
+
+  // 多段拼起来正好下完，也算 complete
+  const fullMulti = planResume(
+    { size, ranges: [{ start: 0, end: 600 }, { start: 600, end: size }], updatedAt: NOW }, size, { now: NOW });
+  ok('多段拼满 → complete', fullMulti.kind === 'complete', fullMulti.kind);
+
+  // 半成品 → partial
+  const half = planResume({ size, ranges: [{ start: 0, end: 500 }], updatedAt: NOW }, size, { now: NOW });
+  ok('半成品 → partial', half.kind === 'partial', half.kind);
+  ok('partial 返回已完成区间', half.ranges.length === 1 && half.ranges[0].end === 500, JSON.stringify(half.ranges));
+
+  // 各种"不能续"
+  ok('无清单 → fresh', planResume(null, size, { now: NOW }).kind === 'fresh');
+  ok('大小不匹配 → fresh',
+    planResume({ size: 999, ranges: [{ start: 0, end: 999 }], updatedAt: NOW }, size, { now: NOW }).kind === 'fresh');
+  ok('已过期 → fresh',
+    planResume({ size, ranges: [{ start: 0, end: 500 }], updatedAt: NOW - RESUME_TTL_MS - 1 }, size, { now: NOW }).kind === 'fresh');
+  ok('realSize 非法 → fresh', planResume({ size, ranges: [], updatedAt: NOW }, 0, { now: NOW }).kind === 'fresh');
+  ok('realSize 为 NaN → fresh', planResume({ size, ranges: [], updatedAt: NOW }, NaN, { now: NOW }).kind === 'fresh');
+  ok('只有空区间 → fresh',
+    planResume({ size, ranges: [], updatedAt: NOW }, size, { now: NOW }).kind === 'fresh');
 }
 
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 续传持久化纯逻辑自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);

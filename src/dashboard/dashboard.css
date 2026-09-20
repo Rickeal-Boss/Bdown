@@ -111,6 +111,14 @@ main {
   border-color: rgba(240, 75, 75, 0.55);
 }
 
+/* 已暂停：用琥珀色左边框 + 淡灰底，一眼能和有在跑的任务区分开。
+   暂停的任务**不进** is-running，所以它不会看起来像还在下载。 */
+.task.is-paused {
+  border-color: var(--bd-warn, #e2a33c);
+  border-left: 3px solid var(--bd-warn, #e2a33c);
+  background: rgba(226, 163, 60, 0.06);
+}
+
 .task-head {
   display: flex;
   align-items: flex-start;
@@ -164,9 +172,14 @@ main {
 .task[data-status='pending'] .act-start,
 .task[data-status='pending'] .act-remove,
 .task[data-status='resolving'] .act-cancel,
+/* 「暂停」只在开启断点续传时出现（data-resume 由 renderTask 写入）。
+   没开续传时暂停 = 中断即丢弃，点了「继续」也是从头下 —— 那是骗用户。 */
+.task[data-status='downloading'][data-resume='1'] .act-pause,
 .task[data-status='downloading'] .act-cancel,
 .task[data-status='muxing'] .act-cancel,
 .task[data-status='saving'] .act-cancel,
+.task[data-status='paused'] .act-resume,
+.task[data-status='paused'] .act-remove,
 .task[data-status='error'] .act-retry,
 .task[data-status='error'] .act-remove,
 .task[data-status='canceled'] .act-retry,

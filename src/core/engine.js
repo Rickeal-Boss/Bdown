@@ -18,7 +18,7 @@ import { BiliApi, pickVideoTrack, pickAudioTrack } from './api.js';
 import { downloadRanged, downloadSequential, probeSize, DownloadAborted } from './downloader.js';
 import { MemorySink, FileHandleSink, OpfsWorkspace, shouldUseMemory } from './sink.js';
 import { blobSource, memorySource, mergeDashStream } from './mp4.js';
-import { addRange } from './resume.js';
+import { addRange, completedBytes } from './resume.js';
 import { ResumeStore, resumeKey } from './resume-store.js';
 import { parseDanmakuXml, danmakuToAss, danmakuToSrt, danmakuToText, filterDanmaku } from './danmaku.js';
 import { parseSubtitleJson, subtitleToSrt, subtitleToAss, subtitleToText, pickSubtitle } from './subtitle.js';
@@ -28,7 +28,12 @@ import { buildFilename, buildVars } from './settings.js';
 import { qualityShort } from './quality.js';
 import { sanitizeFilename, log, warn, sanitizeBiliUrl } from './util.js';
 
-/** @typedef {'pending'|'resolving'|'downloading'|'muxing'|'saving'|'done'|'error'|'canceled'} TaskStatus */
+/**
+ * @typedef {'pending'|'resolving'|'downloading'|'paused'|'muxing'|'saving'|'done'|'error'|'canceled'} TaskStatus
+ *
+ * `paused` 是 v1.4.23 新增的**可恢复终态**：中断了，但续传清单还在，可以原地「继续」。
+ * 它与 `canceled` 的唯一区别就是清单有没有被清掉（见 discardResume）。
+ */
 
 let seq = 0;
 const nextId = () => `t${Date.now().toString(36)}${(seq++).toString(36)}`;
@@ -55,13 +60,47 @@ export class Task {
     this.finishedAt = 0;
     this.outputs = [];
     this.controller = new AbortController();
+
+    /**
+     * 「暂停」意图标记。
+     *
+     * 为什么不在 pause() 里直接改 status：run() 的 await 链被 abort 打断后还要
+     * 走 catch 分支收尾，那时才知道该落到 paused 还是 canceled。这里只记意图，
+     * 由 run() 的 catch 去兑现（见 run 末尾）。
+     */
+    this.paused = false;
+
+    /**
+     * 本任务占用过的续传 key（视轨 / 音轨各一个）。
+     *
+     * 「取消」必须把它们连同 .part 一起删掉 —— 否则用户取消后再下同一个视频，
+     * 只要 size 恰好一致就会续到一份**残缺的旧数据**上，产出静默损坏的文件。
+     */
+    this.resumeKeys = [];
   }
 
   get canceled() {
     return this.controller.signal.aborted;
   }
 
+  /**
+   * 暂停：中断下载但**保留续传清单**，任务停在 `paused`，可由「继续」原地恢复。
+   *
+   * 与 cancel() 的唯一区别就是事后清不清清单，所以两者只差一个标记位。
+   */
+  pause() {
+    this.paused = true;
+    this.controller.abort();
+  }
+
+  /**
+   * 取消：中断下载并**丢弃**续传清单 —— 下次这个视频从头下。
+   *
+   * 注意必须先把 paused 置回 false：用户可能先暂停、再改主意点取消，
+   * 若沿用上一次的 true，取消也会变成暂停（清单被留下）。
+   */
   cancel() {
+    this.paused = false;
     this.controller.abort();
   }
 
@@ -163,6 +202,31 @@ export class DownloadEngine {
 
   find(id) {
     return this.tasks.find((t) => t.id === id);
+  }
+
+  /**
+   * 丢弃一个任务占用过的全部续传清单（连同 .part 分片文件）。
+   *
+   * 「取消」和「任务彻底成功」都要调它：
+   *  - 取消：用户明确放弃，不该留下半份数据 —— 否则下次下同一个视频（size 恰好一致时）
+   *    会续到残缺内容上，产出**静默损坏**的文件；
+   *  - 成功：两轨的 .part 已被 mergeInto 消费，留着只是占 OPFS。
+   *
+   * 而「暂停」**绝不调它** —— 留下清单正是暂停能续传的唯一原因。
+   */
+  async discardResume(task) {
+    const keys = Array.isArray(task?.resumeKeys) ? task.resumeKeys : [];
+    if (!task) return;
+    task.resumeKeys = [];
+    if (!keys.length) return;
+    try {
+      const store = this.resumeStore || (this.resumeStore = new ResumeStore());
+      for (const k of keys) {
+        await store.clear(k).catch(() => {});
+      }
+    } catch (err) {
+      warn('清理续传清单失败（不影响本次结果）', err?.message);
+    }
   }
 
   /**
@@ -513,13 +577,24 @@ export class DownloadEngine {
       setStatus('saving', '保存弹幕/字幕…');
       await this.fetchExtras(task, destination, plan, tempNames);
 
+      // 任务彻底成功：两轨的 .part 已被消费掉，清单与分片文件都可以清了。
+      // 不清的话这些 .part 会永久占着 OPFS（此前"旧 .part 无清理"就挂在遗留清单里）。
+      await this.discardResume(task);
+
       task.progress = 1;
       task.finishedAt = Date.now();
       setStatus('done', '已完成');
     } catch (err) {
       if (err instanceof DownloadAborted || task.canceled) {
         task.finishedAt = Date.now();
-        setStatus('canceled', '已取消');
+        if (task.paused) {
+          // 暂停：清单留着，UI 停在「已暂停」，等用户点「继续」。
+          // 注意这里**不能**调 discardResume —— 那正是暂停与取消的分界线。
+          setStatus('paused', '已暂停，可从断点继续');
+        } else {
+          await this.discardResume(task);
+          setStatus('canceled', '已取消');
+        }
       } else {
         task.error = err?.message || String(err);
         task.finishedAt = Date.now();
@@ -596,6 +671,10 @@ export class DownloadEngine {
           track,
         });
         if (key) {
+          // 记下 key，供「取消 / 成功」时清理（discardResume）。
+          // 暂停时**不会**被清 —— 这正是能续传的原因。
+          if (!Array.isArray(task.resumeKeys)) task.resumeKeys = [];
+          if (!task.resumeKeys.includes(key)) task.resumeKeys.push(key);
           const opened = await store.openPartial(key, size);
           return { sink: opened.sink, resume: { store, key, ranges: opened.ranges }, resumed: opened.resumed };
         }
@@ -705,6 +784,28 @@ export class DownloadEngine {
       await resume.store.write(resume.key, { size: total, ranges: doneRanges });
     };
 
+    /**
+     * 把这一轨标记为「已下完」。
+     *
+     * ★ 这里原来是 `await resume.store.clear(resume.key)` —— 那是 P0：
+     *   把清单删掉等于**忘了记下"这条轨已经下完了"**。下次 openPartial 读不到清单，
+     *   canResume 判 false → 走"不能续传"分支 → **truncate(0) 把 .part 整个抹掉**。
+     *
+     *   典型受害场景（合并模式，两条轨顺序下）：
+     *     视频轨下完 → 音频轨下到一半 → 暂停 → 继续
+     *     → 视频轨 .part 被抹掉重下整份，续传等于没生效。
+     *
+     *   改成写一条「区间 = 全量」的清单后，openPartial 能认出它并直接跳过下载。
+     */
+    const markTrackComplete = (finalSize) => {
+      if (!resume || !resume.store || !resume.key) return Promise.resolve();
+      const s = Number(finalSize) || total;
+      if (!Number.isFinite(s) || s <= 0) return Promise.resolve();
+      return resume.store
+        .write(resume.key, { size: s, ranges: [{ start: 0, end: s }] })
+        .catch(() => {});
+    };
+
     try {
       const result = await downloadRanged({
         urls: list,
@@ -718,25 +819,40 @@ export class DownloadEngine {
           // 分片完成时增量记录：p 里带 range 就记一段
           // 优先用 ranges（本次上报周期内完成的全部区间）；没有则退回单个 range。
           const done = (p && Array.isArray(p.ranges)) ? p.ranges : (p && p.range ? [p.range] : null);
-          if (resume && done && done.length) {
+          if (done && done.length) {
             for (const r of done) {
               if (Number.isFinite(r.start) && Number.isFinite(r.end)) {
                 doneRanges = addRange(doneRanges, { start: r.start, end: r.end + 1 });
               }
             }
-            // 不 await，避免拖慢下载；节流交给调用方（每 300ms 的 report）
-            persistProgress().catch(() => {});
+            // ★ 记账与落盘要分开：没开续传时也要在**内存里**记，
+            //   否则失败重试只能从 0 再来（见下面"保留进度重试"那段）。
+            //   落盘则只在开启续传时做，且不 await，避免拖慢下载；
+            //   节流交给调用方（每 300ms 的 report）。
+            if (resume) persistProgress().catch(() => {});
           }
           onProgress?.(p);
         },
         probe,
         resumeRanges: doneRanges.length ? doneRanges : null,
       });
-      if (resume) await resume.store.clear(resume.key);
+      // 标记完成（不是删除）—— 见 markTrackComplete 的说明
+      await markTrackComplete(result?.size);
       return result;
     } catch (err) {
       if (err instanceof DownloadAborted) {
-        // 用户取消：保留清单，下次可续
+        // ★ 用户取消 / 暂停：必须**先关掉 sink**再记清单、再抛。
+        //
+        // 续传用的 .part 是 FileHandleSink，它的 writable 从 open() 起就一直开着。
+        // 不关会出两个问题：
+        //   ① 已写的字节可能还在 writable 缓冲区里没落盘，
+        //      而清单已经把这些区间记成"已完成" → 下次续上的内容对不上；
+        //   ② 下次「继续」时 openPartial 会对**同一个 .part 文件**再开一个 writable，
+        //      同一个 OPFS 文件两个 writable 并存 → 写入互相覆盖，或直接抛错。
+        //
+        // 先 close 再 persist，保证"落盘完成"发生在"记账"之前。
+        await closeSinkQuietly(sink, '续传分片');
+        // 保留清单，下次可续（取消会在 run() 的 catch 里再把它清掉）
         await persistProgress().catch(() => {});
         throw err;
       }
@@ -767,12 +883,46 @@ export class DownloadEngine {
               probe,
               resumeRanges: null,
             });
-            if (resume) await resume.store.clear(resume.key);
+            await markTrackComplete(retried?.size);
             return retried;
           }
         } catch (e2) {
           warn('刷新播放地址后重试仍失败', e2?.message);
           err = e2;
+        }
+      }
+
+      // ★ 直接回退顺序下载的代价被严重低估了：resetSink 会把**已下好的字节全部丢掉**，
+      //   然后**单连接**从头再下一遍 —— 用户体感就是"下到 80% 突然慢 8 倍"。
+      //
+      //   这是「后半段变慢」最隐蔽的来源之一：它只在出错时触发，
+      //   看起来像网络抽风，实际是我们在主动放弃全部进度。
+      //   只有服务器真的不支持 Range（rangeIgnored）时才必须走这条路。
+      if (!err?.rangeIgnored && doneRanges.length) {
+        const keptBytes = completedBytes(doneRanges);
+        if (keptBytes > 0 && keptBytes < total) {
+          try {
+            warn(`分片下载中断（已下 ${keptBytes} / ${total} 字节），保留进度重试一次`, err.message);
+            const kept = await downloadRanged({
+              urls: list,
+              size: total,
+              writeOffset,
+              sink,
+              concurrency,
+              retries,
+              signal,
+              onProgress,
+              probe,
+              // 只下缺口，已写的字节原地保留 —— 不调 resetSink 是关键
+              resumeRanges: doneRanges,
+            });
+            await markTrackComplete(kept?.size);
+            return kept;
+          } catch (e2) {
+            if (e2 instanceof DownloadAborted) throw e2;
+            warn('保留进度重试仍失败，才回退到顺序下载', e2?.message);
+            err = e2;
+          }
         }
       }
 
