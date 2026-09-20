@@ -84,12 +84,14 @@ export function canResume(meta, expectedSize, { ttlMs = RESUME_TTL_MS, now = Dat
  *
  * @param {object|null} meta 清单（来自 ResumeStore.read）
  * @param {number} realSize 这一轨的真实总字节数
+ * @param {number} [o.actualSize] **磁盘上 .part 的实际字节数**。给了就按它校验，
+ *   不给（< 0）表示调用方测不到，跳过这道校验。
  * @returns {{ kind: 'complete'|'partial'|'fresh', ranges: {start:number,end:number}[], reason: string }}
  *   complete —— 清单显示**已经下完**：直接跳过下载（ranges = 全量）
  *   partial  —— 可以续：ranges 是已完成区间（半开 [start, end)）
  *   fresh    —— 不能续：调用方必须 truncate(0) 从头下
  */
-export function planResume(meta, realSize, { ttlMs = RESUME_TTL_MS, now = Date.now() } = {}) {
+export function planResume(meta, realSize, { ttlMs = RESUME_TTL_MS, now = Date.now(), actualSize = -1 } = {}) {
   const size = Number(realSize);
   if (!Number.isFinite(size) || size <= 0) {
     return { kind: 'fresh', ranges: [], reason: 'realSize 非法' };
@@ -106,6 +108,19 @@ export function planResume(meta, realSize, { ttlMs = RESUME_TTL_MS, now = Date.n
   if (meta && Number(meta.size) === size) {
     const ranges = mergeRanges(meta.ranges);
     if (ranges.length && completedBytes(ranges) >= size) {
+      // ★ 清单说"下完了"还不够，必须以 **.part 的实际长度** 为准。
+      //
+      // 清单只是我们自己写的一份 JSON，它与磁盘上的字节之间没有强制一致性：
+      //   - .part 被截断过（OPFS 配额回收、写入中途异常、句柄未 flush）
+      //   - .part 被清掉而 .json 还在（两者是分开删的，见 clear()）
+      // 只看清单就判 complete 的话，downloadRanged 会算出 0 个缺口、起 0 个 worker
+      // 直接返回 —— 一个字节都不下，然后 mergeInto 拿这份残缺的 .part 去混流，
+      // 产出**静默损坏**的文件（全程不报错，用户只会看到视频花屏/时长错）。
+      //
+      // 所以：磁盘长度够不上清单声称的完成度时，一律降级成 fresh 从头下。
+      // 多下几个字节的代价，远小于产出一个坏文件。
+      const short = mismatchWithDisk(ranges, size, actualSize);
+      if (short) return { kind: 'fresh', ranges: [], reason: short };
       // 返回一个"全量已完成"的区间：downloadRanged 会算出 0 个缺口、
       // 起 0 个 worker 直接返回，一个字节都不用再下。
       return { kind: 'complete', ranges: [{ start: 0, end: size }], reason: '' };
@@ -114,7 +129,24 @@ export function planResume(meta, realSize, { ttlMs = RESUME_TTL_MS, now = Date.n
 
   const verdict = canResume(meta, size, { ttlMs, now });
   if (!verdict.ok) return { kind: 'fresh', ranges: [], reason: verdict.reason };
-  return { kind: 'partial', ranges: mergeRanges(meta.ranges), reason: '' };
+  const partial = mergeRanges(meta.ranges);
+  // 同上：已续区间也不能超出磁盘实际长度，否则会跳过真正缺失的字节。
+  const short = mismatchWithDisk(partial, size, actualSize);
+  if (short) return { kind: 'fresh', ranges: [], reason: short };
+  return { kind: 'partial', ranges: partial, reason: '' };
+}
+
+/**
+ * 校验「清单声称已完成的字节」与「磁盘实际字节」是否对得上。
+ * @returns {string} 空串 = 对得上；非空 = 对不上的原因
+ */
+function mismatchWithDisk(ranges, size, actualSize) {
+  const onDisk = Number(actualSize);
+  // 测不到（< 0）就不校验 —— 不能因为拿不到长度就把所有续传都判死。
+  if (!Number.isFinite(onDisk) || onDisk < 0) return '';
+  const claimed = Math.min(completedBytes(ranges), size);
+  if (onDisk >= claimed) return '';
+  return `清单声称已完成 ${claimed} 字节，但 .part 实际只有 ${onDisk} 字节（数据残缺，从头重下）`;
 }
 
 /**
@@ -203,16 +235,21 @@ export class ResumeStore {
 
     // 以实际文件长度为准修正 size（避免清单偏大导致末尾越界）
     let realSize = Number(size) || 0;
+    let fileSize = 0;
     try {
       const f = await handle.getFile();
-      if (f.size > 0 && (!realSize || f.size !== realSize)) {
+      fileSize = Number(f?.size) || 0;
+      if (fileSize > 0 && (!realSize || fileSize !== realSize)) {
         // 文件内容比清单短很正常（还没下完）；比清单长说明清单过期，以文件为准
-        if (!realSize || f.size > realSize) realSize = f.size;
+        if (!realSize || fileSize > realSize) realSize = fileSize;
       }
     } catch { /* ignore */ }
 
     const meta = await this.read(key);
-    const plan = planResume(meta, realSize, { ttlMs: this.ttlMs });
+    // ★ 把 .part 的真实长度交给 planResume 校验 —— 只信清单会产出静默损坏的文件。
+    //   注意 `create: true` 刚建出的空文件 fileSize 就是 0，正好能挡住
+    //   "清单说下完了、文件其实没了"这种情况。
+    const plan = planResume(meta, realSize, { ttlMs: this.ttlMs, actualSize: fileSize });
 
     if (plan.kind === 'fresh') {
       // ★ 不能续传时必须**真的截断** .part 文件。

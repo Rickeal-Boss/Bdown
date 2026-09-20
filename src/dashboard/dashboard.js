@@ -375,7 +375,12 @@ async function ensurePermission(handle, mode = 'readwrite') {
  */
 async function resolveDestination(task) {
   const prev = task.lastDestination;
-  if (!prev || prev.kind === 'downloads') return { kind: 'downloads' };
+  // ★ 没有上一轮位置（最常见的是"暂停 → 关掉页面 → 重开 → 继续"：
+  //   lastDestination 是内存里的句柄，不会随历史一起存下来）时必须**问用户**，
+  //   不能默默退回浏览器下载目录 —— 用户当初明明选了文件夹，续着续着文件跑到了
+  //   ~/Downloads，还以为是扩展丢了设置。
+  if (!prev) return pickDestination(1);
+  if (prev.kind === 'downloads') return { kind: 'downloads' };
   const handle = prev.kind === 'dir' ? prev.dir : prev.handle;
   if (!handle) return pickDestination(1);
   if (await ensurePermission(handle, 'readwrite')) return prev;
@@ -550,7 +555,12 @@ function releaseSpecKey(task) {
 
 async function loadPendingTasks() {
   const { [HISTORY_KEY]: history = [] } = await chrome.storage.local.get(HISTORY_KEY);
-  const finished = history.filter((r) => ['done', 'error', 'canceled'].includes(r.status));
+  // ★ `paused` 必须一并恢复。
+  //
+  // 它是**可恢复终态而非终态**：只恢复 done/error/canceled 的话，用户暂停后关掉
+  // 下载中心再打开，那个任务会凭空消失 —— 而它留在 OPFS 里的 .part 与清单没人再管
+  // （task 对象没了，resumeKeys 也没了，discardResume 无从调用），永久占着空间。
+  const finished = history.filter((r) => ['done', 'error', 'canceled', 'paused'].includes(r.status));
 
     // 消费并建任务（去重逻辑在 acceptPending 里统一处理）
     const addedCount = await acceptPending(false);
@@ -561,10 +571,14 @@ async function loadPendingTasks() {
     task.quality = rec.quality;
     task.codec = rec.codec;
     task.totalBytes = rec.totalBytes;
+    task.downloadedBytes = Number(rec.downloadedBytes) || 0;
     task.progress = rec.progress || (rec.status === 'done' ? 1 : 0);
     task.error = rec.error;
     task.createdAt = rec.createdAt;
     task.finishedAt = rec.finishedAt;
+    // 恢复「已暂停」任务的续传归属：不还原就再也清不掉它的 .part（见上方说明）
+    task.resumeKeys = Array.isArray(rec.resumeKeys) ? [...rec.resumeKeys] : [];
+    if (task.status === 'paused') task.paused = true;
       engine.tasks.push(task);
       renderTask(task);
     }
@@ -619,6 +633,16 @@ async function init() {
   });
   $('btnStartAll').addEventListener('click', () => startAll().catch((e) => showToast(e.message)));
   $('btnPauseAll').addEventListener('click', () => {
+    // ★ 必须与**单个任务**的「暂停」按钮行为一致：没开断点续传时那个按钮是隐藏的
+    //   （见 renderTask 里的 data-resume 与 CSS），因为没开续传时暂停 = 中断即丢弃，
+    //   显示"保留断点，可继续"是在骗用户。
+    //   这里若不做同样的判断，用户关掉续传后照样能一键暂停 —— 于是任务停在 paused、
+    //   清单却没留下，点「继续」只能从 0 重下；更糟的是 paused 不释放指纹，
+    //   这些任务不点「移除」的话，本会话内这个视频再也派发不出去。
+    if (!settings?.resumeEnabled) {
+      showToast('「全部暂停」需要开启断点续传（设置 → 断点续传）');
+      return;
+    }
     let n = 0;
     for (const t of engine.tasks) {
       if (t.status === 'downloading') {

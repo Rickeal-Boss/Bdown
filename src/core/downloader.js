@@ -144,14 +144,25 @@ export async function readBody(res, { stallMs = STALL_TIMEOUT_MS, signal } = {})
   const chunks = [];
   let total = 0;
 
-  /** 外部取消：把 abort 事件转成 reject，让 race 立刻结束并走到 reader.cancel()。 */
+  /**
+   * 外部取消：把 abort 事件转成 reject，让 race 立刻结束并走到 reader.cancel()。
+   *
+   * ★ 监听函数必须留个引用以便**事后摘掉**。
+   *
+   * 一个任务只有一个 signal（整条下载共用），而 readBody 每个分片都会调一次。
+   * 只挂不摘的话，一个 2GB 的视频听下来会在 signal 上堆出上百个 abort 监听，
+   * 每个都连带拽着它自己那份 promise / reject 闭包 —— 直到 signal 被回收才释放。
+   * 挂 { once: true } 只能保证 abort 触发后自摘，**没 abort 就一个都摘不掉**。
+   */
+  let onAbort = null;
   const abortPromise = signal && typeof signal.addEventListener === 'function'
     ? new Promise((_resolve, reject) => {
         if (signal.aborted) {
           reject(new DownloadAborted());
           return;
         }
-        signal.addEventListener('abort', () => reject(new DownloadAborted()), { once: true });
+        onAbort = () => reject(new DownloadAborted());
+        signal.addEventListener('abort', onAbort, { once: true });
       })
     : null;
 
@@ -183,6 +194,11 @@ export async function readBody(res, { stallMs = STALL_TIMEOUT_MS, signal } = {})
     // 停滞 / 取消 / 读错误都要把 reader 关掉，否则连接会一直挂着
     try { await reader.cancel(); } catch { /* ignore */ }
     throw err;
+  } finally {
+    // 无论正常读完还是中途放弃，都要把 abort 监听摘掉（见上方 onAbort 的说明）。
+    if (onAbort && typeof signal?.removeEventListener === 'function') {
+      signal.removeEventListener('abort', onAbort);
+    }
   }
 
   const out = new Uint8Array(total);

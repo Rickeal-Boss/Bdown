@@ -114,11 +114,18 @@ export class Task {
       quality: this.quality,
       codec: this.codec,
       totalBytes: this.totalBytes,
+      downloadedBytes: this.downloadedBytes,
       progress: this.progress,
       error: this.error,
       createdAt: this.createdAt,
       finishedAt: this.finishedAt,
       spec: this.spec,
+      // ★ 续传 key 必须跟着走。
+      //
+      // `paused` 是**可恢复**状态：关掉下载中心再打开，任务要能接着「继续」。
+      // 恢复出来的 Task 若不认得自己占用过哪些 .part，点「移除」时 discardResume
+      // 就没东西可清 —— 那些 .part 会永久占着 OPFS，还可能被下一次同内容下载续上。
+      resumeKeys: Array.isArray(this.resumeKeys) ? [...this.resumeKeys] : [],
     };
   }
 }
@@ -836,6 +843,17 @@ export class DownloadEngine {
         probe,
         resumeRanges: doneRanges.length ? doneRanges : null,
       });
+      // ★ 「记账」之前必须先把字节**真的落盘**。
+      //
+      // FileHandleSink 的 writeAt 只把写入排进异步链，**只有 close() 才会 await 这条链
+      // 并关掉 writable**。不关就写下"已下完"清单的话，磁盘上的 .part 可能还短着，
+      // 而 openPartial 现在会拿 .part 的真实长度校验清单（见 resume-store.planResume）
+      // —— 长度对不上就判 fresh，把这条已下完的轨 truncate 掉重下，续传等于白做。
+      //
+      // 只在开启续传时做：durl 多个分段共用同一个 sink，中途关掉会让后续分段写不进去；
+      // 其余路径本来就会在 finishOutput / mergeInto 里关。
+      // mergeInto 里的二次 close 是幂等的（close 会把 writable 置 null，再调即空操作）。
+      if (resume) await closeSinkQuietly(sink, '续传分片');
       // 标记完成（不是删除）—— 见 markTrackComplete 的说明
       await markTrackComplete(result?.size);
       return result;
@@ -883,6 +901,7 @@ export class DownloadEngine {
               probe,
               resumeRanges: null,
             });
+            if (resume) await closeSinkQuietly(sink, '续传分片'); // 同上：先落盘再记账
             await markTrackComplete(retried?.size);
             return retried;
           }
@@ -916,6 +935,7 @@ export class DownloadEngine {
               // 只下缺口，已写的字节原地保留 —— 不调 resetSink 是关键
               resumeRanges: doneRanges,
             });
+            if (resume) await closeSinkQuietly(sink, '续传分片'); // 同上：先落盘再记账
             await markTrackComplete(kept?.size);
             return kept;
           } catch (e2) {

@@ -189,6 +189,61 @@ console.log('\n[6] ★ sink 写入链不得被单次失败毒化');
   ok('size 只按成功的写入推进', sink.size === 30, `size=${sink.size}`);
 }
 
+console.log('\n[7] ★ 地址轮换的边界：单地址 / 分片数少于并发数都不能出问题');
+{
+  const TOTAL = 4 * 1024 * 1024;
+  const only = ['https://solo.cdn.test/v.m4s'];
+  const used = new Map();
+  setFetchImpl(async (url, init) => cdnResponse(TOTAL, init, () => used.set(url, (used.get(url) || 0) + 1)));
+  const sink = { writeAt: async () => {} };
+  const res = await downloadRanged({ urls: only, size: TOTAL, sink, concurrency: 8, probe: true });
+  ok('单地址也能下完（轮换开关正确关闭）', res.bytes === TOTAL, `bytes=${res.bytes}`);
+  ok('单地址时不会编造出别的地址', [...used.keys()].join(',') === only[0], [...used.keys()].join(', '));
+
+  // 分片数 < 并发数：8 路并发只切出 2 片，起跳下标不该越界
+  const SMALL = 600 * 1024; // chunkSize 会被 clamp 到 MIN_CHUNK=512KB → 2 片
+  const urls3 = ['https://a.t/x', 'https://b.t/x', 'https://c.t/x'];
+  const used3 = new Map();
+  setFetchImpl(async (url, init) => cdnResponse(SMALL, init, () => used3.set(url, (used3.get(url) || 0) + 1)));
+  const res3 = await downloadRanged({ urls: urls3, size: SMALL, sink: { writeAt: async () => {} }, concurrency: 8, probe: true });
+  ok('分片数少于并发数时也能下完', res3.bytes === SMALL, `bytes=${res3.bytes} / ${SMALL}`);
+  ok('起跳下标不越界（只用列表内的地址）',
+    [...used3.keys()].every((u) => urls3.includes(u)), [...used3.keys()].join(', '));
+}
+
+console.log('\n[8] ★ readBody 不得在 signal 上堆积 abort 监听');
+{
+  // 一个任务从头到尾共用同一个 signal，而 readBody 每个分片调一次。
+  // 只挂不摘的话，几百个分片会在 signal 上堆几百个监听，每个都拽着一份
+  // promise + reject 闭包 —— 直到 signal 被 GC 才释放（本轮 review 实测：
+  // 20 次 readBody 留下 20 个监听）。
+  const { getEventListeners } = await import('node:events');
+  const ctrl = new AbortController();
+  const before = getEventListeners(ctrl.signal, 'abort').length;
+  for (let i = 0; i < 20; i++) {
+    await readBody(streamResponse([new Uint8Array(4)]), { stallMs: 200, signal: ctrl.signal });
+  }
+  const after = getEventListeners(ctrl.signal, 'abort').length;
+  ok('正常读完 20 次后不留监听', after === before, `before=${before} after=${after}`);
+
+  // 中途放弃（停滞）同样要把监听摘掉 —— 这条路径走的是 catch 分支
+  const hung = streamResponse([new Uint8Array(2)], { hangAfter: true });
+  try { await readBody(hung, { stallMs: 40, signal: ctrl.signal }); } catch { /* 预期停滞 */ }
+  const afterStall = getEventListeners(ctrl.signal, 'abort').length;
+  ok('停滞放弃后也不留监听', afterStall === before, `after=${afterStall}`);
+
+  // 取消路径也不能留
+  const ctrl2 = new AbortController();
+  const base2 = getEventListeners(ctrl2.signal, 'abort').length;
+  const hang2 = streamResponse([], { hangAfter: true });
+  const p = readBody(hang2, { stallMs: 5000, signal: ctrl2.signal }).catch(() => {});
+  setTimeout(() => ctrl2.abort(), 20);
+  await p;
+  ok('取消路径也不留监听',
+    getEventListeners(ctrl2.signal, 'abort').length === base2,
+    `after=${getEventListeners(ctrl2.signal, 'abort').length}`);
+}
+
 setFetchImpl(null);
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);

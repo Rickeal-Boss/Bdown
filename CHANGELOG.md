@@ -77,11 +77,32 @@
 `_chain` 永久 rejected → 之后每次 `writeAt` 的回调都被跳过、立刻 reject
 → **这个文件再也写不进去任何字节**。改为让链自身吞掉错误、把真实 task 返回给调用方。
 
+### 独立复核轮补修（质量门神）
+
+**上一轮我修 bug 时自己引入了回归而自查没发现，所以这一版照例过了独立复核 ——
+结果确实抓到 4 个 P1，其中两个我自己没想到：**
+
+| # | 问题 | 为什么危险 |
+|---|------|-----------|
+| P1-1 | `planResume` 判 complete 只信清单 JSON，不看 `.part` 实际长度 | `.part` 被截断或只删了一半时判 complete → 0 缺口 → 拿残缺数据混流 → **静默产出坏 MP4，全程不报错** |
+| P1-2 | `markTrackComplete` 写在 `.part` 还没 `close()` flush 之前 | `writeAt` 只排队入链，只有 close 才落盘 → 清单说"下完了"但磁盘还短着 → 被 P1-1 的新校验判 fresh 重下 |
+| P1-3 | `paused` 不进历史持久化，`toRecord` 不带 `resumeKeys` | 暂停 → 关页面 → 重开，任务消失，它的 `.part` 从此没人能清，永久占 OPFS |
+| P1-4 | `resolveDestination` 没有上一轮位置时默默退回浏览器下载目录 | 用户明明选过文件夹，续着续着文件跑到 `~/Downloads`，还以为扩展丢了设置 |
+
+另有 P2 两项已修：`readBody` 的 abort 监听只挂不摘（实测同一 signal 调 20 次就堆 20 个监听，
+`{once:true}` 只在真正 abort 时才自摘）；「全部暂停」不受断点续传开关约束，与单任务按钮行为不一致。
+
+**复核同时澄清了我担心的两点并不成立**（已写成断言锁住，避免下轮重复排查）：
+- 保留进度重试不会无限循环（只做一次，之后必回落顺序下载）；`missingRanges` 对越界区间做了 clamp
+- 轮换在 `list.length===1` / `ranges.length<concurrency` 下均不越界
+
 ### 测试
 
-25 套件 / 全绿。新增 `tools/test-stall-rotation.mjs`（18 项：停滞检测 / 取消贯穿
-body 读取 / 多地址分摊 / 轮换自动关闭 / 写入链不毒化）、`planResume` 12 项、
-暂停与取消语义 9 项。新测试已同步登记进 `validate.yml`。
+26 套件 / 全绿。新增 `tools/test-stall-rotation.mjs`（25 项：停滞检测 / 取消贯穿
+body 读取 / 多地址分摊 / 轮换边界 / 监听不堆积 / 写入链不毒化）、
+`tools/test-resume-pause-guard.mjs`（22 项：complete 必须被磁盘长度挡下 / toRecord 必须带
+resumeKeys / 无上一轮位置必须问用户）、`planResume` 12 项、暂停与取消语义 9 项。
+新测试已同步登记进 `validate.yml`。
 
 ### 真机验证建议
 

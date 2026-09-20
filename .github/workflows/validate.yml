@@ -48,6 +48,13 @@ jobs:
       - name: 断点续传持久化纯逻辑自检（key 派生 / 清单校验）
         run: node tools/test-resume-store.mjs
 
+      # 暂停/继续这一版新增的三条静默失效路径：
+      #   1. 清单判 complete 只信清单不看 .part 实际长度 → 混流出静默损坏的文件
+      #   2. Task.toRecord 不带 resumeKeys → 暂停后重开页面，.part 永久泄漏
+      #   3. 没有上一轮保存位置时默默改存下载目录 → 用户选的文件夹被无视
+      - name: 暂停/继续守护自检（complete 需以 .part 实际长度为准 / 续传 key 随任务持久化）
+        run: node tools/test-resume-pause-guard.mjs
+
       - name: playurl 路由自检（ugc / 番剧 / 课程三分支）
         run: node tools/test-playurl-routing.mjs
 
