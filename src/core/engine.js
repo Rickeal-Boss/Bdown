@@ -852,8 +852,23 @@ export class DownloadEngine {
         signal,
         onProgress: wrappedProgress,
         probe,
+        // ★ 必须把探测到的**真实**大小回写到 `total`。
+        //
+        // `downloadRanged` 内部会先发 `Range: bytes=0-0` 探测精确大小并修正它自己
+        // 的 `size`（估算值来自 `bandwidth × duration / 8`，误差可达数个百分点）。
+        // 而 `fetchTo` 的 `total` 若不同步更新，暂停时写进续传清单的就是**估算值**；
+        // 下次「继续」时 `prepareStage` 传入的是探测过的**真实值**，两者不相等 →
+        // `canResume` 判「大小不匹配」→ `truncate(0)` → 已下好的字节被抹掉重下。
+        //
+        // 这正是「暂停后继续却从头下载」的根因。
+        onResolvedSize: (resolved) => {
+          if (Number(resolved) > 0) total = Number(resolved);
+        },
         resumeRanges: doneRanges.length ? doneRanges : null,
       });
+      // 末尾分片的 `shortAtEof` 也会修正真实大小（估算偏大时最后一片会短），
+      // 成功路径用它再兜一次底
+      if (Number(result?.size) > 0) total = Number(result.size);
       // ★ 「记账」之前必须先把字节**真的落盘**。
       //
       // FileHandleSink 的 writeAt 只把写入排进异步链，**只有 close() 才会 await 这条链

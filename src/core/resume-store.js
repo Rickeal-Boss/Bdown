@@ -270,6 +270,15 @@ export class ResumeStore {
     const plan = planResume(meta, realSize, { ttlMs: this.ttlMs, actualSize: fileSize });
 
     if (plan.kind === 'fresh') {
+      // ★ 只在"确实有清单却用不上"时告警。
+      //   首次下载本来就没清单，不该每次都刷屏；
+      //   而"有清单却判 fresh"意味着用户已下的字节要被丢弃 ——
+      //   这正是「暂停后继续却从头下载」的直接现象，必须把原因打出来，
+      //   否则只能靠猜（大小不匹配 / 过期 / 磁盘长度对不上，三者的修法完全不同）。
+      if (meta) {
+        warn(`续传清单不可用，本次将从头下载：${plan.reason}`);
+      }
+
       // ★ 不能续传时必须**真的截断** .part 文件。
       //
       // 只返回 `ranges: []` 而不截断的话：调用方（engine.prepareStage → fetchTo）

@@ -48,6 +48,13 @@ jobs:
       - name: 断点续传持久化纯逻辑自检（key 派生 / 清单校验）
         run: node tools/test-resume-store.mjs
 
+      # 「暂停后继续却从头下载」的链路复现：用内存版 OPFS 跑真实的
+      # 写入→扩展文件长度→写清单→重开 全过程。
+      # 纯逻辑测试（planResume）全绿也照样漏掉过这个 bug —— 因为判据写错时
+      # 纯函数测试看不出来，必须把 OPFS 的"随机偏移写入会扩展长度"这一语义跑出来。
+      - name: 暂停/继续 链路自检（内存版 OPFS，防续传静默失效）
+        run: node tools/test-resume-restart.mjs
+
       # 暂停/继续这一版新增的三条静默失效路径：
       #   1. 清单判 complete 只信清单不看 .part 实际长度 → 混流出静默损坏的文件
       #   2. Task.toRecord 不带 resumeKeys → 暂停后重开页面，.part 永久泄漏
