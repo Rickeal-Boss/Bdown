@@ -143,6 +143,12 @@ function renderTask(task) {
   // 不用 el.querySelector(...).hidden —— 作者样式表里的 display:inline-flex
   // 优先级高于 UA 的 [hidden]{display:none}，设 hidden 是无效的。
   el.dataset.resume = settings?.resumeEnabled ? '1' : '0';
+  const pauseBtn = el.querySelector('.act-pause');
+  if (pauseBtn) {
+    pauseBtn.title = settings?.resumeEnabled
+      ? '暂停（保留已下载部分，可稍后继续）'
+      : '需先在设置中开启「断点续传」才能暂停';
+  }
   el.className = `task${['resolving', 'downloading', 'muxing', 'saving'].includes(task.status) ? ' is-running' : ''}${
     task.status === 'paused' ? ' is-paused' : ''
   }${task.status === 'done' ? ' is-done' : ''}${task.status === 'error' ? ' is-error' : ''}`;
@@ -339,6 +345,21 @@ function pauseTask(task) {
     showToast('只有下载中阶段可以暂停');
     return;
   }
+
+  // ★ 未开启断点续传时**不能真的暂停**：那时中断即丢弃，没有清单可留，
+  //   「继续」也只能从 0 重下 —— 那是在骗用户。
+  //
+  //   但也不能像早期那样把按钮**隐藏**掉：用户最初反馈的就是"没有暂停按钮"，
+  //   功能上线了却看不见，需求等于原地打转。所以这里给出明确引导 ——
+  //   点了就说明原因并直接打开设置页，让用户知道开关在哪。
+  if (!settings?.resumeEnabled) {
+    showToast('暂停需要开启「断点续传」，已为你打开设置页');
+    try {
+      chrome.runtime.openOptionsPage?.();
+    } catch { /* 打不开不影响下载 */ }
+    return;
+  }
+
   task.pause();
   showToast('正在暂停…（等待在途分片收尾）');
 }
@@ -640,7 +661,10 @@ async function init() {
     //   清单却没留下，点「继续」只能从 0 重下；更糟的是 paused 不释放指纹，
     //   这些任务不点「移除」的话，本会话内这个视频再也派发不出去。
     if (!settings?.resumeEnabled) {
-      showToast('「全部暂停」需要开启断点续传（设置 → 断点续传）');
+      showToast('「全部暂停」需要开启断点续传，已为你打开设置页');
+      try {
+        chrome.runtime.openOptionsPage?.();
+      } catch { /* 打不开不影响下载 */ }
       return;
     }
     let n = 0;

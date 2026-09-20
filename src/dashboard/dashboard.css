@@ -113,6 +113,11 @@ main {
 
 /* 已暂停：用琥珀色左边框 + 淡灰底，一眼能和有在跑的任务区分开。
    暂停的任务**不进** is-running，所以它不会看起来像还在下载。 */
+/* 未开启断点续传：弱化「暂停」，提示它点了会去设置页 */
+.task[data-resume='0'] .act-pause {
+  opacity: 0.55;
+}
+
 .task.is-paused {
   border-color: var(--bd-warn, #e2a33c);
   border-left: 3px solid var(--bd-warn, #e2a33c);
@@ -172,9 +177,13 @@ main {
 .task[data-status='pending'] .act-start,
 .task[data-status='pending'] .act-remove,
 .task[data-status='resolving'] .act-cancel,
-/* 「暂停」只在开启断点续传时出现（data-resume 由 renderTask 写入）。
-   没开续传时暂停 = 中断即丢弃，点了「继续」也是从头下 —— 那是骗用户。 */
-.task[data-status='downloading'][data-resume='1'] .act-pause,
+/* 「暂停」按钮**始终可见**。
+   没开断点续传时也曾想过直接隐藏，但那等于"功能上线了用户却看不见" ——
+   用户最初反馈的就是"没有暂停按钮"，隐藏它需求就原地打转了。
+   这里改成：一律显示，未开启续传时用半透明弱化，点击后给出引导
+   （pauseTask 里 toast + 打开设置页），既给了发现路径，也不骗人。 */
+.task[data-status='downloading'] .act-pause,
+.task[data-status='downloading'][data-resume='0'] .act-pause,
 .task[data-status='downloading'] .act-cancel,
 .task[data-status='muxing'] .act-cancel,
 .task[data-status='saving'] .act-cancel,

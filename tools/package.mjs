@@ -34,10 +34,24 @@ const EXCLUDE_EXT = new Set(['.m4s', '.mp4', '.log', '.tmp', '.pyc']);
  */
 const TEMP_DIR_RE = /^_(?!locales)/;
 
+/**
+ * ★ 隐藏文件（点开头）一律不进包。
+ *
+ * 为什么在 `TEMP_DIR_RE` 之外还要补这条：上次只防了"下划线开头的目录"（`_zv` 那种），
+ * 于是污染换了个形态又进来了 —— 两个临时探针脚本 `.sec-ping.mjs` / `.sec-verify.mjs`
+ * 被整份打进包里，文件数 44 → 46、体积 +11KB，而包内结构肉眼看不出异常。
+ *
+ * 点开头的文件比 `_zv` 更危险：`ls` 默认不显示它们，git status 也容易一眼扫漏，
+ * 等到商店提交被拒或装上去出问题才发现。Chrome 扩展运行时不需要任何隐藏文件，
+ * （`.git` 等已在 EXCLUDE_DIRS 里排除），这里可以一刀切。
+ */
+const HIDDEN_RE = /^\./;
+
 function walk(dir, acc = []) {
   for (const name of readdirSync(dir)) {
     if (EXCLUDE_DIRS.has(name)) continue;
     if (TEMP_DIR_RE.test(name)) continue;
+    if (HIDDEN_RE.test(name)) continue;
     if (EXCLUDE_FILES.has(name)) continue;
     const full = join(dir, name);
     const st = statSync(full);
@@ -191,6 +205,20 @@ function main() {
   // _locales 反而必须存在（国际化），缺了说明排除规则写错了
   if (!entries.some((e) => e.path.startsWith('_locales/'))) {
     throw new Error('包内缺少 _locales/（国际化目录被误排除？）');
+  }
+
+  // ★ 隐藏文件自检：包内任何 path 段以 `.` 开头都要直接失败。
+  //
+  // 与上面的临时目录自检是**两种不同形态的污染** —— 上次只加了下划线那一条，
+  // 于是 `.sec-*.mjs` 这类点开头的临时脚本照样混了进来。两条都要有。
+  const hidden = entries
+    .map((e) => e.path)
+    .filter((p) => p.split('/').some((seg) => HIDDEN_RE.test(seg)));
+  if (hidden.length) {
+    throw new Error(
+      `包内混入了隐藏文件：${hidden.slice(0, 10).join(', ')}\n` +
+        '  多为临时探针/脚本残留（如 .sec-*.mjs）。它们在 ls 里默认不可见，请删除后重新打包。',
+    );
   }
 
   const zip = buildZip(entries);

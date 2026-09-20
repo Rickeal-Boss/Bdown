@@ -123,6 +123,20 @@ console.log('\n[3] planResume — ★ 已下完的轨必须判 complete，不能
     planResume({ size, ranges: [{ start: 0, end: 500 }], updatedAt: NOW - RESUME_TTL_MS - 1 }, size, { now: NOW }).kind === 'fresh');
   ok('realSize 非法 → fresh', planResume({ size, ranges: [], updatedAt: NOW }, 0, { now: NOW }).kind === 'fresh');
   ok('realSize 为 NaN → fresh', planResume({ size, ranges: [], updatedAt: NOW }, NaN, { now: NOW }).kind === 'fresh');
+
+  // ★ complete 分支**刻意不校验 TTL**（partial 分支走 canResume 有 7 天 TTL）。
+  //   这里锁住这个决策，防止有人"顺手补上 TTL" —— 那会让暂停超过 7 天的任务
+  //   在字节完整的情况下被整轨重下。理由见 resume-store.js 里的注释。
+  const oldFull = planResume(
+    { size, ranges: [{ start: 0, end: size }], updatedAt: NOW - RESUME_TTL_MS - 1 }, size, { now: NOW });
+  ok('★ 超期的 complete 清单仍判 complete（不按时间挡，只按字节挡）',
+    oldFull.kind === 'complete', `实际 ${oldFull.kind}（${oldFull.reason}）`);
+  ok('缺 updatedAt 的 complete 清单仍判 complete（同理）',
+    planResume({ size, ranges: [{ start: 0, end: size }], updatedAt: 0 }, size, { now: NOW }).kind === 'complete');
+  // 但 partial 分支的 TTL 必须照常生效 —— 两种判定各自成立，不要互相"统一"
+  ok('★ partial 分支的 TTL 仍然生效（超期 → fresh）',
+    planResume({ size, ranges: [{ start: 0, end: 500 }], updatedAt: NOW - RESUME_TTL_MS - 1 }, size, { now: NOW })
+      .kind === 'fresh');
   ok('只有空区间 → fresh',
     planResume({ size, ranges: [], updatedAt: NOW }, size, { now: NOW }).kind === 'fresh');
 }

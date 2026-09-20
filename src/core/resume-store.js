@@ -105,6 +105,24 @@ export function planResume(meta, realSize, { ttlMs = RESUME_TTL_MS, now = Date.n
   // 合并模式下这是必现场景：视频轨先下完、音频轨下到一半时暂停 →
   // 继续时视频轨本该直接跳过，却会被重下整份，续传等于没生效。
   // （前提：fetchTo 成功时写"全量区间"清单而不是 clear，见 engine.markTrackComplete。）
+  //
+  // ★ 这里**刻意不校验 TTL**，与下面的 partial 分支（走 canResume，有 7 天 TTL）不同。
+  //   这不是遗漏，是权衡后的决定 —— 曾经加过 TTL，随即撤销，理由记在这里避免下轮再争：
+  //
+  //   - partial 依赖的假设是「这些区间对应**当前**这份内容」，时间久了不可信 → 需要 TTL；
+  //   - complete 依赖的是「磁盘上确实有这么多字节」这个**事实**，已由下面的
+  //     mismatchWithDisk 按 .part 的真实长度验证过。按字节挡比按时间挡准。
+  //
+  //   加 TTL 的代价是确定的：用户暂停超过 7 天再继续，字节明明完整却被整轨重下；
+  //   而它防的"陈旧"风险极不确定 —— .part 位于 OPFS，只有本扩展可写，
+  //   且 resumeKey 含 bvid/cid/quality/codec，源内容一换 size 几乎必变（会被大小校验挡下）。
+  //   用确定的体验损失去防一个不确定的风险，不划算。
+  //
+  //   真要治存储占用，正解是加一个"孤儿 .part 清扫器"（扫 manifest 里无人引用的 .part），
+  //   而不是在失败/过期时删数据 —— 那会把"失败后重试能续传"这个已有能力一并废掉。
+  void ttlMs;
+  void now;
+
   if (meta && Number(meta.size) === size) {
     const ranges = mergeRanges(meta.ranges);
     if (ranges.length && completedBytes(ranges) >= size) {

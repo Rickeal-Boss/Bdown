@@ -12,7 +12,7 @@
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { sanitizeBiliUrl, escapeHtml, sanitizeFilename } from '../src/core/util.js';
+import { sanitizeBiliUrl, safeMediaUrl, escapeHtml, sanitizeFilename } from '../src/core/util.js';
 
 let pass = 0;
 let fail = 0;
@@ -44,10 +44,36 @@ console.log('\n[1] ★ sanitizeBiliUrl：接口返回的 URL 不能随意带凭�
   ok('http:// 被升级为 https://（禁止明文带凭证）',
     http.url.startsWith('https://') && http.safe, JSON.stringify(http));
 
-  // 非 B 站域名必须被拒
+  // 非白名单域名必须被拒
   const evil = sanitizeBiliUrl('https://evil.com/steal');
-  ok('非 B 站域名 → safe=false（调用方须降级为 omit）', evil.safe === false, JSON.stringify(evil));
-  ok('并给出可读原因', /非 B 站域名/.test(evil.reason || ''), evil.reason);
+  ok('非白名单域名 → safe=false（调用方须降级为 omit）', evil.safe === false, JSON.stringify(evil));
+  ok('并给出可读原因', /非白名单域名/.test(evil.reason || ''), evil.reason);
+  // 原因里必须带上被拒的主机名，否则排障时看不出是哪个域被拦了
+  ok('原因里含被拒的主机名', (evil.reason || '').includes('evil.com'), evil.reason);
+
+  // ★ 播放地址白名单必须放行 akamai CDN（manifest 与 DNR 规则都声明了它，
+  //   但 BILI_HOST_SUFFIXES 里没有 —— 用错白名单会把合法备用 CDN 全滤掉）
+  const akamai = safeMediaUrl('http://upos-sz-mirrorcosov.bilivideo.com/xy.m4s');
+  ok('合法 bilivideo CDN 播放地址 → 放行', akamai.startsWith('https://'), String(akamai));
+  ok('合法 akamaized CDN 播放地址 → 放行',
+    safeMediaUrl('http://x.akamaized.net/a.m4s').startsWith('https://'),
+    String(safeMediaUrl('http://x.akamaized.net/a.m4s')));
+  for (const bad of [
+    'http://evil.example.com/collect',
+    'http://169.254.169.254/latest/meta-data/iam/', // 云元数据服务
+    'http://192.168.1.1/cgi-bin/reboot.cgi',        // 内网网关
+  ]) {
+    ok(`播放地址白名单必须挡下 ${bad}`, safeMediaUrl(bad) === '', String(safeMediaUrl(bad)));
+  }
+
+  // ★ 两条**不走域名比对分支**的拒绝路径，上面那组坏地址覆盖不到，
+  //   只测 https://evil 会让它们一直是盲区：
+  //   - file: 在 `protocol !== 'https:'` 就提前返回了，压根走不到域名比对
+  //   - 协议相对 URL 是先补 https、再走域名比对，是"另一条输入、同一个出口"
+  ok('file: 伪协议 → 空串（在协议分支就被挡下，到不了域名比对）',
+    safeMediaUrl('file:///etc/passwd') === '', String(safeMediaUrl('file:///etc/passwd')));
+  ok('协议相对 //evil.example.com/x → 空串（补成 https 后域名仍不过）',
+    safeMediaUrl('//evil.example.com/x') === '', String(safeMediaUrl('//evil.example.com/x')));
 
   // 仿冒域名不能绕过（endsWith('.bilibili.com') 而非 includes）
   for (const spoof of [

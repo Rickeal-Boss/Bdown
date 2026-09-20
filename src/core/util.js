@@ -294,6 +294,25 @@ const BILI_HOST_SUFFIXES = [
 ];
 
 /**
+ * 音视频**下载地址**的域名白名单。
+ *
+ * ★ 必须比 BILI_HOST_SUFFIXES 多一个 `akamaized.net`：
+ *   它是 B 站用的 akamai CDN 域，manifest 的 `host_permissions` 与 DNR 规则 1
+ *   都声明了它，但 BILI_HOST_SUFFIXES 里没有。直接拿 BILI_HOST_SUFFIXES 去过滤
+ *   播放地址，会把**合法的 akamai 备用 CDN** 全滤掉，造成下载直接失败。
+ *
+ * 为什么播放地址要单独一套白名单：接口返回的 `base_url` / `backup_url` 此前
+ * 只做了 `http://` → `https://` 替换，**没有任何域名校验**，等于响应体里写什么
+ * 我们就去请求什么。后果是：
+ *   - 用户只授权了 6 个 B 站域（见 manifest），代码却能打任意域 —— 权限声明与实际行为不符
+ *   - 真实 IP / 真实 UA / `Origin: chrome-extension://<id>` 外泄到第三方
+ *   - 可被指向内网地址（如 `169.254.169.254` 元数据服务）做探测
+ * 下载地址不带 Cookie（`credentials: 'omit'`），所以最大的一块（B 站登录态）没有外泄，
+ * 但上面这些仍然成立。
+ */
+const MEDIA_HOST_SUFFIXES = [...BILI_HOST_SUFFIXES, 'akamaized.net'];
+
+/**
  * 把接口给的 URL 规整成**可安全带凭证请求**的形式。
  *
  * 做三件事：
@@ -302,10 +321,12 @@ const BILI_HOST_SUFFIXES = [
  *   3. 域名必须在 B 站自有域白名单内
  *
  * @param {string} rawUrl
+ * @param {{ suffixes?: string[] }} [opts] 域名白名单，默认 BILI_HOST_SUFFIXES。
+ *   播放地址校验要传 MEDIA_HOST_SUFFIXES（见 safeMediaUrl）。
  * @returns {{ url: string, safe: boolean, reason?: string }}
  *   `safe=false` 表示**不应**带凭证（调用方应降级为 `credentials: 'omit'` 或跳过）
  */
-export function sanitizeBiliUrl(rawUrl) {
+export function sanitizeBiliUrl(rawUrl, { suffixes = BILI_HOST_SUFFIXES } = {}) {
   const raw = String(rawUrl ?? '').trim();
   if (!raw) return { url: '', safe: false, reason: '空 URL' };
 
@@ -325,10 +346,23 @@ export function sanitizeBiliUrl(rawUrl) {
   }
 
   const host = parsed.hostname.toLowerCase();
-  const ok = BILI_HOST_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`));
-  if (!ok) return { url: parsed.toString(), safe: false, reason: `非 B 站域名：${host}` };
+  const ok = suffixes.some((s) => host === s || host.endsWith(`.${s}`));
+  if (!ok) return { url: parsed.toString(), safe: false, reason: `非白名单域名：${host}` };
 
   return { url: parsed.toString(), safe: true };
+}
+
+/**
+ * 校验**音视频下载地址**（playurl 返回的 `base_url` / `backup_url`）。
+ *
+ * @param {string} rawUrl
+ * @returns {string} 合规返回 https 形式的 URL；不合规返回 **空串**（调用方必须过滤掉）
+ *
+ * 注意不能直接用 `sanitizeBiliUrl` 的默认白名单 —— 见 MEDIA_HOST_SUFFIXES 的注释。
+ */
+export function safeMediaUrl(rawUrl) {
+  const { url, safe } = sanitizeBiliUrl(rawUrl, { suffixes: MEDIA_HOST_SUFFIXES });
+  return safe ? url : '';
 }
 
 export function log(...args) {

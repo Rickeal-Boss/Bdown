@@ -15,7 +15,7 @@
  *
  * 运行：node tools/test-stall-rotation.mjs
  */
-import { readBody, downloadRanged, setFetchImpl, DownloadAborted } from '../src/core/downloader.js';
+import { readBody, downloadRanged, downloadSequential, setFetchImpl, DownloadAborted } from '../src/core/downloader.js';
 import { FileHandleSink } from '../src/core/sink.js';
 
 let pass = 0;
@@ -242,6 +242,50 @@ console.log('\n[8] ★ readBody 不得在 signal 上堆积 abort 监听');
   ok('取消路径也不留监听',
     getEventListeners(ctrl2.signal, 'abort').length === base2,
     `after=${getEventListeners(ctrl2.signal, 'abort').length}`);
+}
+
+console.log('\n[9] ★ 顺序下载（Range 不支持时的回退路径）同样要有停滞检测');
+{
+  // 这条路径是**单连接**，一旦被"滴灌"挂住比分片路径更彻底
+  // （分片路径至少还有其他 worker 在跑，这里一条连接挂了就全挂）。
+  const r = streamResponse([new Uint8Array(10)], { hangAfter: true });
+  setFetchImpl(async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    body: r.body,
+  }));
+
+  const sink = { writeAt: async () => {} };
+  let err = null;
+  const t0 = Date.now();
+  try {
+    await downloadSequential({ urls: ['https://x.test/a'], sink, stallMs: 60 });
+  } catch (e) {
+    err = e;
+  }
+  const dt = Date.now() - t0;
+  ok('顺序下载遇到滴灌会抛错', err !== null, '一直读下去了 —— 单连接挂死');
+  ok('错误带 stalled 标记', err?.stalled === true, `err.stalled=${err?.stalled}`);
+  ok('在阈值附近触发', dt < 2000, `耗时 ${dt}ms`);
+  ok('放弃时关掉了 reader', r.isCancelled() === true, 'reader 没被 cancel');
+}
+
+console.log('\n[10] ★ 顺序下载正常流式写入不误判');
+{
+  const r = streamResponse([new Uint8Array(100), new Uint8Array(200), new Uint8Array(56)]);
+  setFetchImpl(async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: (h) => (String(h).toLowerCase() === 'content-length' ? '356' : null) },
+    body: r.body,
+  }));
+  const writes = [];
+  const sink = { writeAt: async (off, b) => { writes.push([off, b.length]); } };
+  const res = await downloadSequential({ urls: ['https://x.test/a'], sink, stallMs: 200 });
+  ok('总字节正确', res.bytes === 356, `bytes=${res.bytes}`);
+  ok('按偏移顺序写入', writes.length === 3 && writes[0][0] === 0 && writes[1][0] === 100 && writes[2][0] === 300,
+    JSON.stringify(writes));
 }
 
 setFetchImpl(null);

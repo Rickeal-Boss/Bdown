@@ -125,6 +125,31 @@ export class DownloadAborted extends Error {
 }
 
 /**
+ * 读一块，带停滞检测（只负责"这一块别等死"，不负责拼装）。
+ *
+ * `readBody` 用它做内存内累积；`downloadSequential` 用它做流式落盘。
+ * 两者都必须有这道保护 —— 只在一处加，另一处就会留下同样的挂死。
+ *
+ * @param {ReadableStreamDefaultReader} reader
+ * @param {number} stallMs
+ */
+async function readChunk(reader, stallMs = STALL_TIMEOUT_MS) {
+  let timer = null;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`读取停滞：${stallMs}ms 内没有收到任何字节`);
+      err.stalled = true;
+      reject(err);
+    }, stallMs);
+  });
+  try {
+    return await Promise.race([reader.read(), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * 带停滞检测的响应体读取。
  *
  * 逐块读，每收到一块就续一次命；`stallMs` 内零字节则主动放弃并**关掉 reader**
@@ -542,6 +567,8 @@ export async function downloadSequential({
   onProgress = () => {},
   referer = 'https://www.bilibili.com/',
   knownSize = 0,
+  /** 停滞判定阈值。与 readBody 一致，允许测试注入小值（否则单测要真等 15s）。 */
+  stallMs = STALL_TIMEOUT_MS,
 }) {
   const list = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
   if (!list.length) throw new Error('没有可用的下载地址');
@@ -564,27 +591,39 @@ export async function downloadSequential({
       if (!res.ok) throw httpError(res);
       const total = Number(res.headers.get('Content-Length') || 0) || knownSize;
       const reader = res.body.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        await sink.writeAt(downloaded, value);
-        downloaded += value.length;
-        const now = performance.now();
-        const dt = (now - lastTick) / 1000;
-        if (dt > 0.3) {
-          const inst = (downloaded - lastBytes) / dt;
-          speed = speed ? speed * 0.7 + inst * 0.3 : inst;
-          lastTick = now;
-          lastBytes = downloaded;
-          onProgress({
-            downloaded,
-            total: total || downloaded,
-            ratio: total ? downloaded / total : 0,
-            speed,
-            elapsed: (now - startedAt) / 1000,
-            eta: speed > 0 && total ? (total - downloaded) / speed : Infinity,
-          });
+      try {
+        for (;;) {
+          // ★ 与 readBody 同样的停滞检测。
+          //
+          // 这条路径是"服务器不支持 Range"时的兜底（**单连接**顺序下载），
+          // 此前是裸 `reader.read()`，没有任何超时 —— 于是"滴灌"这个 readBody
+          // 专门要治的问题在兜底路径上原样存在，而且因为只有一条连接，
+          // 一旦挂住比分片路径更彻底（没有别的 worker 在跑）。
+          const { done, value } = await readChunk(reader, stallMs);
+          if (done) break;
+          await sink.writeAt(downloaded, value);
+          downloaded += value.length;
+          const now = performance.now();
+          const dt = (now - lastTick) / 1000;
+          if (dt > 0.3) {
+            const inst = (downloaded - lastBytes) / dt;
+            speed = speed ? speed * 0.7 + inst * 0.3 : inst;
+            lastTick = now;
+            lastBytes = downloaded;
+            onProgress({
+              downloaded,
+              total: total || downloaded,
+              ratio: total ? downloaded / total : 0,
+              speed,
+              elapsed: (now - startedAt) / 1000,
+              eta: speed > 0 && total ? (total - downloaded) / speed : Infinity,
+            });
+          }
         }
+      } catch (err) {
+        // 停滞 / 取消都要把 reader 关掉，否则连接一直挂着
+        try { await reader.cancel(); } catch { /* ignore */ }
+        throw err;
       }
       onProgress({
         downloaded,

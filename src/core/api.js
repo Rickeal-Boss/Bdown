@@ -12,7 +12,7 @@
 import { getMixinKey, signParams, buildDmParams, resetMixinKey } from './wbi.js';
 import { av2bv } from './avbv.js';
 import { AUDIO_QUALITIES, CODECS } from './quality.js';
-import { retry, log, warn } from './util.js';
+import { retry, log, warn, safeMediaUrl } from './util.js';
 
 const API = 'https://api.bilibili.com';
 const REFERER = 'https://www.bilibili.com/';
@@ -587,8 +587,8 @@ export function normalizePlayInfo(data, mode) {
         frameRate: v.frameRate,
         bandwidth: v.bandwidth,
         size: v.size || Math.trunc(((v.bandwidth || 0) * duration) / 8),
-        url: httpsUrl(v.baseUrl || v.base_url),
-        backupUrls: (v.backupUrl || v.backup_url || []).map(httpsUrl),
+        url: safeMediaUrl(v.baseUrl || v.base_url),
+        backupUrls: mediaUrls(v.backupUrl || v.backup_url),
         mimeType: v.mimeType || 'video/mp4',
       });
     }
@@ -602,8 +602,8 @@ export function normalizePlayInfo(data, mode) {
         codecs: a.codecs,
         bandwidth: a.bandwidth,
         size: a.size || Math.trunc(((a.bandwidth || 0) * duration) / 8),
-        url: httpsUrl(a.baseUrl || a.base_url),
-        backupUrls: (a.backupUrl || a.backup_url || []).map(httpsUrl),
+        url: safeMediaUrl(a.baseUrl || a.base_url),
+        backupUrls: mediaUrls(a.backupUrl || a.backup_url),
         mimeType: a.mimeType || 'audio/mp4',
       });
     };
@@ -614,10 +614,10 @@ export function normalizePlayInfo(data, mode) {
 
   for (const d of data.durl || []) {
     durl.push({
-      url: httpsUrl(d.url),
+      url: safeMediaUrl(d.url),
       size: d.size,
       length: Number(d.length || 0) / 1000,
-      backupUrls: (d.backup_url || []).map(httpsUrl),
+      backupUrls: mediaUrls(d.backup_url),
     });
   }
 
@@ -636,9 +636,18 @@ export function normalizePlayInfo(data, mode) {
   };
 }
 
-function httpsUrl(u) {
-  if (!u) return u;
-  return String(u).replace(/^http:\/\//, 'https://');
+/**
+ * 把一批备用地址过一遍域名白名单，丢掉不合规的。
+ *
+ * ★ 为什么必须过滤而不是照单全收：
+ *   `base_url` / `backup_url` 直接来自 playurl 的响应体。只做 `http` → `https`
+ *   替换的话，响应里写什么我们就去请求什么 —— 而用户只授权了 manifest 里那几个
+ *    B 站域。真实 IP / 真实 UA / 扩展 ID 会外泄到第三方，还可能被指向内网地址做探测。
+ *
+ * 过滤后为空是**合法**结果（例如该清晰度只有主地址），调用方不要因此报错。
+ */
+function mediaUrls(list) {
+  return (Array.isArray(list) ? list : []).map(safeMediaUrl).filter(Boolean);
 }
 
 /**
