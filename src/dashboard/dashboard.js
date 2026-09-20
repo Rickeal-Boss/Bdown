@@ -225,6 +225,21 @@ async function prunePendingTask(task) {
 
 async function startTask(task) {
   if (task.status !== 'pending' && task.status !== 'error' && task.status !== 'canceled') return;
+
+  // ★ 尊重「同时下载的任务数」设置。
+  //
+  // 旧实现这里**完全没有检查** runningCount —— 于是逐个点「开始」时想跑几个跑几个，
+  // 而 maxParallelTasks 只对「全部开始」生效。用户设了 2 却同时跑 5 个，
+  // 会以为这个设置坏了。
+  //
+  // 这里不能像 pump() 那样自动排队：ask 模式下每个任务都要用户选保存位置，
+  // 没有 destination 就没法自动启动。所以给出明确提示，让用户等槽位空出来。
+  const maxParallel = Math.max(1, settings.maxParallelTasks || 2);
+  if (runningCount >= maxParallel) {
+    showToast(`已有 ${runningCount} 个任务在进行中（上限 ${maxParallel}），请等其中一个完成后再开始`);
+    return;
+  }
+
   const destination = await pickDestination(1);
   if (!destination) return;
 
