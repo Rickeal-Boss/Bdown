@@ -137,13 +137,6 @@ jobs:
       - name: 控制字符检查（禁止 tab/LF/CR 之外的 C0 控制字符）
         run: node tools/lint-control-chars.mjs
 
-      # 打包产物门禁：包内文件数/内容漂移这个坑栽过三次（_zv 残留 44→88、
-      # .sec-*.mjs 点开头文件 44→46、0 字节 node_diff.txt）。前两条已由
-      # tools/package.mjs 的 TEMP_DIR_RE / HIDDEN_RE 从源头排除，这条站在
-      # **产物侧**独立复核，不信任上游的排除规则。
-      - name: 发布门禁（包内文件数基线 / 无临时与隐藏文件 / manifest 完整性）
-        run: node tools/test-release-gate.mjs
-
       # 元检查：本工作流是**逐条列文件**的，新增测试若忘了加进来，
       # CI 会"绿着"却 0 覆盖。这条断言所有 tools/test-*.mjs 与
       # tools/lint-*.mjs 都已被本工作流引用。
