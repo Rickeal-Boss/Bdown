@@ -24,9 +24,20 @@ const EXCLUDE_DIRS = new Set([
 const EXCLUDE_FILES = new Set(['.gitignore', '.env', 'package.json', 'package-lock.json']);
 const EXCLUDE_EXT = new Set(['.m4s', '.mp4', '.log', '.tmp', '.pyc']);
 
+/**
+ * 约定：**以下划线开头**的目录是临时/脚本产物，不进包 —— 但 `_locales` 是
+ * 扩展必需的国际化目录，必须保留，所以用否定顺序环视排除它。
+ *
+ * 为什么需要这条：曾经有个校验脚本临时解压目录 `_zv` 因命令中断没被清掉，
+ * 下一次打包就把它**整份**塞进了扩展包（文件数 44 → 88、体积 468KB → 940KB）。
+ * 这种污染在 zip 里很难肉眼发现，却会让商店提交和真实安装都出问题。
+ */
+const TEMP_DIR_RE = /^_(?!locales)/;
+
 function walk(dir, acc = []) {
   for (const name of readdirSync(dir)) {
     if (EXCLUDE_DIRS.has(name)) continue;
+    if (TEMP_DIR_RE.test(name)) continue;
     if (EXCLUDE_FILES.has(name)) continue;
     const full = join(dir, name);
     const st = statSync(full);
@@ -162,6 +173,24 @@ function main() {
   // manifest 必须存在，否则打出来的包装不上
   if (!entries.some((e) => e.path === 'manifest.json')) {
     throw new Error('包内缺少 manifest.json');
+  }
+
+  // ★ 污染自检：任何"下划线开头但不是 _locales"的目录被打包进来都要**直接失败**。
+  // 这类目录几乎都是临时产物（解压校验、脚本输出），混进扩展包会导致
+  // 商店提交失败或安装后行为异常，而且只看文件数很难发现。
+  const polluted = entries
+    .map((e) => e.path.split('/')[0])
+    .filter((top) => TEMP_DIR_RE.test(top));
+  if (polluted.length) {
+    throw new Error(
+      `包内混入了临时目录：${[...new Set(polluted)].join(', ')}\n` +
+        '  多半是上次校验/脚本中断留下的残留，请删除后重新打包。',
+    );
+  }
+
+  // _locales 反而必须存在（国际化），缺了说明排除规则写错了
+  if (!entries.some((e) => e.path.startsWith('_locales/'))) {
+    throw new Error('包内缺少 _locales/（国际化目录被误排除？）');
   }
 
   const zip = buildZip(entries);
