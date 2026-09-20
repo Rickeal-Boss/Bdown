@@ -34,11 +34,23 @@ jobs:
       - name: playurl 路由自检（ugc / 番剧 / 课程三分支）
         run: node tools/test-playurl-routing.mjs
 
+      # 课程链接 /cheese/play/ep<id> 若被通用 /ep(\d+) 抢先匹配，会被当成番剧
+      # 打到 /pgc 端点（错误），任务必失败。extractVideoId 是每次下载的入口，
+      # 历史上零测试覆盖 —— 这条锁住它。
+      - name: 视频 ID 解析自检（BV/av/ep/ss/cheese + 边界与脏链接）
+        run: node tools/test-extract-id.mjs
+
       - name: 清晰度挑选自检（DASH 下 qn 无效，必须客户端挑）
         run: node tools/test-quality-pick.mjs
 
       - name: 章节模块自检（view_points 解析与 txt/vtt 导出）
         run: node tools/test-chapters.mjs
+
+      # 合集（ugc_season）批量：把合集每一集展开成独立任务。
+      # ⚠️ 这个套件从 v1.4.14 加上后**一直没被工作流引用**，等于从未在 CI 跑过 ——
+      # 由 lint-ci-coverage.mjs 在 v1.4.21 发现。现在补上。
+      - name: 合集解析自检（ugc_season 展开 / 可批量化判定）
+        run: node tools/test-season.mjs
 
       - name: NFO 元数据自检（XML 转义 / movie+episode+tvshow 三形态）
         run: node tools/test-nfo.mjs
@@ -61,6 +73,12 @@ jobs:
       - name: nav 健壮性自检（超时/重试/响应校验 + 抖动时不降级登录态）
         run: node tools/test-nav.mjs
 
+      # DNR 规则改请求头极易产生副作用：曾经用一条宽泛规则命中所有
+      # *.bilibili.com 子域（含 passport 登录接口）并删 Origin，
+      # 导致扩展开启时主站多个页面无法登录。这条锁住"不误伤主页面"的边界。
+      - name: DNR 规则副作用防御（不误伤主站 / 通用 CDN / 必须补 Referer）
+        run: node tools/test-dnr-side-effects.mjs
+
       # B 站 CDN 地址约 120 分钟失效（403/404）：必须重新 playurl 换地址，
       # 拿同一个过期地址重试必然全败
       - name: 播放地址过期刷新自检（403/404 -> refreshUrls 重试）
@@ -78,6 +96,18 @@ jobs:
 
       - name: 未定义标识符检查（node --check 抓不到读取未声明变量）
         run: node tools/lint-noundef.mjs
+
+      # 用 heredoc 写源码时，文本里的 \u0000 这类转义会被工具链解释成**真实控制字符**
+      # 写进文件。曾把 util.js 写坏（含真实 NUL 字节 → grep 判定为 Binary file，
+      # 破坏 diff / 代码审查）。这条扫描全部源码禁止非法控制字符。
+      - name: 控制字符检查（禁止 tab/LF/CR 之外的 C0 控制字符）
+        run: node tools/lint-control-chars.mjs
+
+      # 元检查：本工作流是**逐条列文件**的，新增测试若忘了加进来，
+      # CI 会"绿着"却 0 覆盖。这条断言所有 tools/test-*.mjs 与
+      # tools/lint-*.mjs 都已被本工作流引用。
+      - name: CI 覆盖检查（新增测试必须被工作流引用，防止"绿着没跑"）
+        run: node tools/lint-ci-coverage.mjs
 
       - name: 引擎端到端（合成 fMP4，四条分支都断言 done + 校验合并产物结构）
         run: node tools/test-engine-e2e.mjs
