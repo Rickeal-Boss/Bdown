@@ -813,6 +813,34 @@ export class DownloadEngine {
         .catch(() => {});
     };
 
+    /**
+     * 包一层 onProgress：分片完成时把区间记进 `doneRanges`。
+     *
+     * ★ 三处 `downloadRanged` 调用**必须共用这一个**包装版本。
+     *   原来只有首次调用包了，两条重试路径传的是**原始** onProgress ——
+     *   于是重试期间下的字节完全没有记账，带来两个隐患：
+     *     - 重试再失败时，"已下区间"少算了重试那一段，回退顺序下载时白白重下；
+     *     - 开了续传时，重试期间的进度不落盘，下次续传的起点比实际偏早。
+     */
+    const wrappedProgress = (p) => {
+      // 分片完成时增量记录：p 里带 range 就记一段
+      // 优先用 ranges（本次上报周期内完成的全部区间）；没有则退回单个 range。
+      const done = (p && Array.isArray(p.ranges)) ? p.ranges : (p && p.range ? [p.range] : null);
+      if (done && done.length) {
+        for (const r of done) {
+          if (Number.isFinite(r.start) && Number.isFinite(r.end)) {
+            doneRanges = addRange(doneRanges, { start: r.start, end: r.end + 1 });
+          }
+        }
+        // ★ 记账与落盘要分开：没开续传时也要在**内存里**记，
+        //   否则失败重试只能从 0 再来（见下面"保留进度重试"那段）。
+        //   落盘则只在开启续传时做，且不 await，避免拖慢下载；
+        //   节流交给调用方（每 300ms 的 report）。
+        if (resume) persistProgress().catch(() => {});
+      }
+      onProgress?.(p);
+    };
+
     try {
       const result = await downloadRanged({
         urls: list,
@@ -822,24 +850,7 @@ export class DownloadEngine {
         concurrency,
         retries,
         signal,
-        onProgress: (p) => {
-          // 分片完成时增量记录：p 里带 range 就记一段
-          // 优先用 ranges（本次上报周期内完成的全部区间）；没有则退回单个 range。
-          const done = (p && Array.isArray(p.ranges)) ? p.ranges : (p && p.range ? [p.range] : null);
-          if (done && done.length) {
-            for (const r of done) {
-              if (Number.isFinite(r.start) && Number.isFinite(r.end)) {
-                doneRanges = addRange(doneRanges, { start: r.start, end: r.end + 1 });
-              }
-            }
-            // ★ 记账与落盘要分开：没开续传时也要在**内存里**记，
-            //   否则失败重试只能从 0 再来（见下面"保留进度重试"那段）。
-            //   落盘则只在开启续传时做，且不 await，避免拖慢下载；
-            //   节流交给调用方（每 300ms 的 report）。
-            if (resume) persistProgress().catch(() => {});
-          }
-          onProgress?.(p);
-        },
+        onProgress: wrappedProgress,
         probe,
         resumeRanges: doneRanges.length ? doneRanges : null,
       });
@@ -897,7 +908,7 @@ export class DownloadEngine {
               concurrency,
               retries,
               signal,
-              onProgress,
+              onProgress: wrappedProgress,
               probe,
               resumeRanges: null,
             });
@@ -930,7 +941,7 @@ export class DownloadEngine {
               concurrency,
               retries,
               signal,
-              onProgress,
+              onProgress: wrappedProgress,
               probe,
               // 只下缺口，已写的字节原地保留 —— 不调 resetSink 是关键
               resumeRanges: doneRanges,

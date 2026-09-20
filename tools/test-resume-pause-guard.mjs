@@ -141,5 +141,68 @@ console.log('\n[3] ★ 「继续」拿不到上一轮保存位置时，必须问
     got3.kind === 'dir' && got3.dir.name === 'my-folder', JSON.stringify(got3));
 }
 
+console.log('\n[4] ★ 失败重试必须带着已下的进度（不能从 0 重来）');
+{
+  const { DownloadEngine } = await import('../src/core/engine.js');
+  const dl = await import('../src/core/downloader.js');
+
+  const TOTAL = 1024 * 1024;
+  const CHUNK = 512 * 1024; // size/(concurrency*4) = 1MB/8 = 128KB → 被 MIN_CHUNK 抬到 512KB
+  const R0 = `bytes=0-${CHUNK - 1}`;
+  const R1 = `bytes=${CHUNK}-${TOTAL - 1}`;
+
+  /** 每个分片被请求了几次（按 Range 头计数） */
+  const asked = new Map();
+  let failR1 = true; // 第二个分片首轮失败一次
+
+  dl.setFetchImpl(async (url, init) => {
+    const range = init?.headers?.Range || '';
+    asked.set(range, (asked.get(range) || 0) + 1);
+    const m = /bytes=(\d+)-(\d+)/.exec(range);
+    const s = m ? Number(m[1]) : 0;
+    const e = m ? Number(m[2]) : TOTAL - 1;
+
+    // 第一个分片慢一点，好让它的进度**赶在**失败之前被 report 出去
+    // （report 有 300ms 节流，太快完成的区间不会被记账）。
+    if (range === R0) await new Promise((r) => setTimeout(r, 350));
+    if (range === R1) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (failR1) {
+        failR1 = false;
+        throw new Error('HTTP 500');
+      }
+    }
+    return {
+      status: 206,
+      headers: {
+        get: (h) => {
+          const k = String(h).toLowerCase();
+          if (k === 'accept-ranges') return 'bytes';
+          if (k === 'content-range') return `bytes ${s}-${e}/${TOTAL}`;
+          return null;
+        },
+      },
+      arrayBuffer: async () => new Uint8Array(e - s + 1).buffer,
+    };
+  });
+
+  const written = [];
+  const sink = {
+    writeAt: async (offset, bytes) => { written.push(offset); void bytes; },
+  };
+  const engine = new DownloadEngine({ settings: { concurrency: 2, retries: 0 } });
+  const res = await engine.fetchTo({ urls: ['https://cdn.test/v.m4s'], size: TOTAL, sink, probe: true });
+
+  ok('最终下完了整个文件', res.bytes === TOTAL, `bytes=${res.bytes}`);
+  ok('第一个分片只被请求过 1 次（重试没有重下它）',
+    asked.get(R0) === 1, `被请求了 ${asked.get(R0)} 次 —— 说明重试把已下的部分又下了一遍`);
+  ok('第二个分片被请求过 2 次（首轮失败 + 重试）',
+    asked.get(R1) === 2, `被请求了 ${asked.get(R1)} 次`);
+  ok('写入偏移不重复（不会把已下字节再写一遍）',
+    new Set(written).size === written.length, `偏移 ${written.join(', ')}`);
+
+  dl.setFetchImpl(null);
+}
+
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 暂停/继续 守护自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);
 process.exit(fail === 0 ? 0 : 1);
