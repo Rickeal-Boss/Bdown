@@ -604,7 +604,10 @@ export function normalizePlayInfo(data, mode) {
         size: a.size || Math.trunc(((a.bandwidth || 0) * duration) / 8),
         url: safeMediaUrl(a.baseUrl || a.base_url),
         backupUrls: mediaUrls(a.backupUrl || a.backup_url),
-        mimeType: a.mimeType || 'audio/mp4',
+        // B 站同时返回 `mimeType` 与 `mime_type` 两种写法且同值。
+        // 只读一种的话，哪天服务端只给另一种，扩展名就会**静默退回 .m4a**
+        // （无损轨因此变成打不开的 .m4a）。yt-dlp 是两种都读，这里照做。
+        mimeType: a.mimeType || a.mime_type || 'audio/mp4',
       });
     };
     for (const a of dash.audio || []) pushAudio(a, 'audio');

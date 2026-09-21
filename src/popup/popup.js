@@ -194,7 +194,12 @@ function buildQualityOptions() {
       quality: q,
       label: extra.label || QUALITIES[q]?.label || `清晰度 ${q}`,
       short: qualityShort(q),
-      size: video ? (video.size || 0) + (bestAudio?.size || 0) : 0,
+      // ★ 「仅音频」模式下只算音轨，别把视频大小也算进去 ——
+      //   否则弹窗显示的「预计 X MB」比实际产物大一个数量级，
+      //   用户会以为下载出错了。
+      size: currentMode() === 'audio'
+        ? (bestAudio?.size || 0)
+        : (video ? (video.size || 0) + (bestAudio?.size || 0) : 0),
       // ★ 只认"精确存在"。accept_quality 会虚报（实测未登录时宣称
       // [116,80,64,32,16] 而 dash.video 只有 [32,16]），不能作为可用性依据。
       available: !!video,
@@ -459,6 +464,17 @@ function currentMode() {
   return document.querySelector('input[name="mode"]:checked')?.value || settings.downloadMode;
 }
 
+/**
+ * 选了「仅音频」但这个视频**没有独立音轨**。
+ *
+ * 典型是老视频 / 单文件直下（durl）资源：只有一条含音视频的整轨，
+ * 拿不出纯音频。此时 engine 会静默退回下载完整视频 —— 用户选了「仅音频」
+ * 却拿到一个 MP4，会以为扩展坏了。这里提前说明。
+ */
+function audioUnavailable() {
+  return currentMode() === 'audio' && !(playInfo?.audios?.length);
+}
+
 function updateSummary() {
   const specs = collectSpecs();
   const qualityOpt = buildQualityOptions().find((o) => o.quality === selectedQuality);
@@ -466,7 +482,11 @@ function updateSummary() {
   $('summary').innerHTML = `
     共 <b>${specs.length}</b> 个任务 · 清晰度 <b>${escapeHtml(qualityOpt?.label || '—')}</b>
     · 预计 <b>${formatBytes(totalSize)}</b>
-    ${settings.downloadMode === 'durl' ? '<br><span class="bd-hint">单文件直下模式的实际清晰度以接口返回为准</span>' : ''}`;
+    ${currentMode() === 'durl' ? '<br><span class="bd-hint">单文件直下模式的实际清晰度以接口返回为准</span>' : ''}
+    ${currentMode() === 'audio' ? '<br><span class="bd-hint">仅音频模式只下载音轨，与上方清晰度无关</span>' : ''}
+    ${audioUnavailable()
+      ? '<br><span class="bd-hint">⚠ 该视频没有独立音轨（多为老视频/单文件直下），无法只下载音频，将下载完整视频</span>'
+      : ''}`;
   $('btnStart').disabled = specs.length === 0;
 }
 
