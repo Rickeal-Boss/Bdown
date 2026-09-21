@@ -422,6 +422,14 @@ function collectSpecs() {
       bvid: info.bvid,
       aid: info.aid,
       epId: currentSpec.epId,
+      // ★ 本次下载的「下载方式」随任务走，而不是去改全局设置。
+      //
+      // 旧实现在点「开始下载」时把 downloadMode 一起 saveSettings 写回全局，
+      // 于是用户为**一次**需求选了「仅音频」，之后所有下载都静默变成仅音频、
+      // 设置页也被改掉 —— 用户会以为设置自己跑了。
+      // （这段上方关于 defaultQuality 的注释说的正是同一件事，那次只修了清晰度，
+      //   downloadMode 是漏网的同类问题。）
+      downloadMode: currentMode(),
       cid: page?.cid,
       pageIndex: p - 1,
       totalPages: total,
@@ -446,6 +454,11 @@ function collectSpecs() {
   });
 }
 
+/** 弹窗里当前选中的下载方式（本次生效用）。 */
+function currentMode() {
+  return document.querySelector('input[name="mode"]:checked')?.value || settings.downloadMode;
+}
+
 function updateSummary() {
   const specs = collectSpecs();
   const qualityOpt = buildQualityOptions().find((o) => o.quality === selectedQuality);
@@ -464,14 +477,16 @@ function updateSummary() {
 async function startDownload() {
   const specs = collectSpecs();
   if (!specs.length) return;
-  // 注意：**不要**在这里写 defaultQuality。
+  // 注意：**不要**在这里写 defaultQuality，也**不要**写 downloadMode。
   //
   // 旧实现写了 `defaultQuality: 0`，等于每次点「开始下载」都把用户在设置页
   // 选的默认清晰度**静默重置成"自动"**。用户改了设置、下次打开设置页又变回自动，
   // 会以为设置没保存。本次下载的清晰度已经通过 specs[].quality 显式传递，
   // 不需要也不应该回头改全局默认值。
+  //
+  // downloadMode 是**同一个坑**：为一次需求选了「仅音频」，会从此把所有下载
+  // 都变成仅音频、连设置页也被改掉。现在它改由 specs[].downloadMode 随任务传递。
   await saveSettings({
-    downloadMode: document.querySelector('input[name="mode"]:checked')?.value || settings.downloadMode,
     saveDanmaku: $('optDanmaku').checked,
     saveSubtitle: $('optSubtitle').checked,
     saveCover: $('optCover').checked,

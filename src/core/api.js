@@ -726,8 +726,21 @@ export function pickExactTrack(videos, quality, preferCodec = 'avc') {
 export function pickAudioTrack(audios, { preferLossless = true } = {}) {
   if (!audios.length) return null;
   const rank = (a) => {
-    if (a.type === 'flac') return preferLossless ? 0 : 3;
-    if (a.type === 'dolby') return preferLossless ? 1 : 2;
+    // ★ `preferLossless=false`（设置项「普通音轨」）时必须把无损/杜比**排到最后**，
+    //   而不是"给一个比普通轨更大的数字"。
+    //
+    //   普通 AAC 的 rank 恒为 4（`4 - min(3, floor((id - 30200) / 100))`：
+    //   30216 / 30232 / 30280 的 floor 都是 0）。而改动前 flac=3、dolby=2 ——
+    //   排序是**升序取第一个**，于是选「普通音轨（最高码率）」反而优先拿到**杜比**，
+    //   与文案完全相反；更糟的是非会员也躲不开（这两种轨只在有权限时返回，
+    //   用户没法主动避开，拿到手的却是自己没选的东西）。
+    //
+    //   这里用 99 而不是直接过滤掉：万一这个视频**只有**无损轨，还能兜底拿到内容，
+    //   总好过整个任务报"没有可用音轨"。
+    if (a.type === 'flac' || a.type === 'dolby') {
+      if (preferLossless) return a.type === 'flac' ? 0 : 1;
+      return 99;
+    }
     return 4 - Math.min(3, Math.floor((a.id - 30200) / 100));
   };
   return [...audios].sort((a, b) => {

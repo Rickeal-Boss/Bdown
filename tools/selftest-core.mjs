@@ -15,7 +15,8 @@ import { escapeHtml, sanitizeFilename } from '../src/core/util.js';
 import { formUrlEncode, getMixinKey, signParams, resetMixinKey } from '../src/core/wbi.js';
 import { md5 } from '../src/core/md5.js';
 import { av2bv, bv2av, isBvid } from '../src/core/avbv.js';
-import { buildPlan } from '../src/core/engine.js';
+import { buildPlan, audioOutputMeta } from '../src/core/engine.js';
+import { pickAudioTrack } from '../src/core/api.js';
 
 let pass = 0;
 let fail = 0;
@@ -196,6 +197,57 @@ check('audio：不下视频轨，体积只算音轨', () => {
   const p = buildPlan(mkInfo(), { downloadMode: 'audio', preferCodec: 'avc', audioPreference: 'best' }, {});
   return eq([p.video, p.audioOnly, p.totalBytes], [null, true, 200]);
 });
+// ★ 扩展名必须跟着音轨的真实类型走，不能一律 .m4a。
+//
+// 默认 audioPreference='best' 会优先选中 FLAC 无损轨，于是**默认路径上**
+// 就会把 FLAC 字节流存成 .m4a，用户双击很可能打不开。
+check('audioOutputMeta：FLAC 轨 → .flac / audio/flac', () => {
+  const m = audioOutputMeta({ type: 'flac', mimeType: 'audio/flac' });
+  return eq([m.ext, m.mime], ['flac', 'audio/flac']);
+});
+check('audioOutputMeta：只认 mimeType 也能判出 FLAC（type 缺失时兜底）', () => {
+  return eq(audioOutputMeta({ mimeType: 'audio/flac' }).ext, 'flac');
+});
+check('audioOutputMeta：普通 AAC 轨 → .m4a / audio/mp4', () => {
+  const m = audioOutputMeta({ type: 'audio', mimeType: 'audio/mp4', id: 30280 });
+  return eq([m.ext, m.mime], ['m4a', 'audio/mp4']);
+});
+check('audioOutputMeta：杜比轨 → .m4a（E-AC-3 装在 MP4 容器里）', () => {
+  const m = audioOutputMeta({ type: 'dolby', mimeType: 'audio/mp4' });
+  return eq([m.ext, m.mime], ['m4a', 'audio/mp4']);
+});
+check('audioOutputMeta：无信息时兜底 .m4a（不返回空扩展名）', () => {
+  return eq(audioOutputMeta(null).ext, 'm4a');
+});
+
+// ★ 「普通音轨」设置项必须真的避开无损/杜比。
+//
+// 改动前普通 AAC 的 rank 恒为 4，而 flac=3、dolby=2 —— 升序取第一个的话，
+// 选「普通音轨（最高码率）」反而优先拿到**杜比**，与文案完全相反。
+check('pickAudioTrack：normal 模式必须选普通轨，不能选到无损/杜比', () => {
+  const audios = [
+    { id: 30216, type: 'audio', bandwidth: 64000 },
+    { id: 30280, type: 'audio', bandwidth: 320000 },
+    { id: 30250, type: 'dolby', bandwidth: 500000 },
+    { id: 30251, type: 'flac', bandwidth: 900000 },
+  ];
+  const picked = pickAudioTrack(audios, { preferLossless: false });
+  return eq([picked.type, picked.id], ['audio', 30280]);
+});
+check('pickAudioTrack：best 模式仍优先无损', () => {
+  const audios = [
+    { id: 30280, type: 'audio', bandwidth: 320000 },
+    { id: 30250, type: 'dolby', bandwidth: 500000 },
+    { id: 30251, type: 'flac', bandwidth: 900000 },
+  ];
+  return eq(pickAudioTrack(audios, { preferLossless: true }).type, 'flac');
+});
+check('pickAudioTrack：只有无损轨时 normal 也要能兜底拿到内容', () => {
+  const audios = [{ id: 30251, type: 'flac', bandwidth: 900000 }];
+  const picked = pickAudioTrack(audios, { preferLossless: false });
+  return eq(picked.id, 30251);
+});
+
 check('audio：无视频轨也不报错（纯音频投稿）', () => {
   const info = mkInfo();
   info.videos = [];

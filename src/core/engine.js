@@ -242,7 +242,14 @@ export class DownloadEngine {
    * @param {Destination} destination
    */
   async run(task, destination) {
-    const { settings, api } = this;
+    // ★ 任务级的设置覆盖：弹窗里选的「下载方式」是**本次生效**，不写回全局设置
+    //   （见 popup.js —— 旧实现会写回，导致选一次「仅音频」之后所有下载都变成仅音频）。
+    //   所以这里要把 spec 里带的值并进本次运行用的 settings，
+    //   后续 buildPlan / 各下载分支 / refinePlanSizes 拿到的就都是同一个值。
+    const settings = task.spec?.downloadMode
+      ? { ...this.settings, downloadMode: task.spec.downloadMode }
+      : this.settings;
+    const { api } = this;
     const signal = task.controller.signal;
     const setStatus = (status, phaseText = '') => {
       task.status = status;
@@ -439,11 +446,12 @@ export class DownloadEngine {
         }
         await this.finishOutput(out, task, destination, `${task.filename}.mp4`, 'video/mp4');
       } else if (audioOnly) {
-        // 仅音频：单路下载，音轨原样落盘为 .m4a
+        // 仅音频：单路下载，音轨原样落盘（不合并、不转码）
+        const { ext: aExt, mime: aMime } = audioOutputMeta(plan.audio);
         const out = await this.createOutput({
           task,
           destination,
-          name: `${task.filename}.m4a`,
+          name: `${task.filename}.${aExt}`,
           singleOutput: true,
           sizeHint: plan.audio.size,
           tempNames,
@@ -464,7 +472,7 @@ export class DownloadEngine {
         if (task.canceled) throw new DownloadAborted();
 
         setStatus('saving', '保存音频文件…');
-        await this.finishOutput(out, task, destination, `${task.filename}.m4a`, 'audio/mp4');
+        await this.finishOutput(out, task, destination, `${task.filename}.${aExt}`, aMime);
       } else if (separate) {
         // 音视频分离输出：两路各自落盘
         const vOut = await this.createOutput({
@@ -490,10 +498,12 @@ export class DownloadEngine {
         });
         if (task.canceled) throw new DownloadAborted();
 
+        // 与「仅音频」同因：无损轨要存成 .flac，不能一律 .m4a
+        const { ext: sepExt, mime: sepMime } = audioOutputMeta(plan.audio);
         const aOut = await this.createOutput({
           task,
           destination,
-          name: `${task.filename}.audio.m4a`,
+          name: `${task.filename}.audio.${sepExt}`,
           singleOutput: false,
           sizeHint: plan.audio.size,
           tempNames,
@@ -515,7 +525,7 @@ export class DownloadEngine {
 
         setStatus('saving', '保存音视频文件…');
         await this.finishOutput(vOut, task, destination, `${task.filename}.video.mp4`, 'video/mp4');
-        await this.finishOutput(aOut, task, destination, `${task.filename}.audio.m4a`, 'audio/mp4');
+        await this.finishOutput(aOut, task, destination, `${task.filename}.audio.${sepExt}`, sepMime);
       } else {
         // DASH 合并模式：两条轨道先落到临时目标，再混流到最终输出
         const vPrep = await this.prepareStage({
@@ -1372,13 +1382,46 @@ export function buildPlan(playInfo, settings, spec) {
   return {
     mode: 'dash',
     quality: audioOnly ? 0 : (video?.quality || quality),
-    codec: audioOnly ? '—' : (video?.codec || ''),
+    // ★ 仅音频时不要填 '—'。
+    //   它是真值，会走进文件名模板的 `{codec}` → 产出 `标题_—` 这种怪名字
+    //   （而 `quality: 0` 是假值，`{quality}` 会被替换成空串 → `标题_`）。
+    //   填音轨的真实编码，文件名才有意义。
+    codec: audioOnly ? (audioOutputMeta(audio).ext === 'flac' ? 'flac' : 'aac') : (video?.codec || ''),
     video: audioOnly ? null : video,
     audio,
     audioOnly,
     durl: [],
     totalBytes: ((audioOnly ? 0 : video?.size) || 0) + (audio.size || 0),
   };
+}
+
+/**
+ * 决定**音频产物**的扩展名与 MIME。
+ *
+ * ★ 绝不能一律写 `.m4a`。
+ *
+ *   B 站的 Hi-Res 无损音轨是 FLAC（api.js 里 `type='flac'`、`mimeType='audio/flac'`），
+ *   而 `audioPreference` 默认 `'best'` 会**优先选中**它 —— 也就是说**默认路径上**
+ *   就会把 FLAC 字节流存成 `.m4a`，用户双击很可能打不开。这不是边缘场景。
+ *
+ *   无论这个 FLAC 是裸流还是 fMP4 封装，硬编码 `.m4a` 都是错的：
+ *     - 裸 FLAC  → 扩展名不对，播放器按 .m4a 解析失败
+ *     - fMP4 封装 → 扩展名对，但 Chrome 不认 fLaC 编码，UI 承诺的"直接可播"落空
+ *
+ *   数据来源是接口返回的 `mimeType`（api.js 已取到），与 yt-dlp 的做法一致 ——
+ *   它是 `ext = mimetype2ext(mimeType)`，从不硬编码。
+ *
+ * @param {{ type?: string, mimeType?: string, mime_type?: string }} track
+ * @returns {{ ext: string, mime: string }}
+ */
+export function audioOutputMeta(track) {
+  const mime = String(track?.mimeType || track?.mime_type || '').toLowerCase();
+  const type = String(track?.type || '').toLowerCase();
+  if (mime.includes('flac') || type === 'flac') {
+    return { ext: 'flac', mime: 'audio/flac' };
+  }
+  // 杜比全景声是 E-AC-3 装在 MP4 容器里，标准扩展名仍是 .m4a
+  return { ext: 'm4a', mime: 'audio/mp4' };
 }
 
 /**
