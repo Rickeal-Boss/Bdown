@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "__MSG_extName__",
   "short_name": "Bdown",
-  "version": "1.4.25",
+  "version": "1.4.26",
   "description": "__MSG_extDesc__",
   "default_locale": "zh_CN",
   "minimum_chrome_version": "116",

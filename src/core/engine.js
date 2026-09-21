@@ -397,9 +397,24 @@ export class DownloadEngine {
       setStatus('downloading', '下载中…');
 
       const refreshProgress = () => {
-        task.downloadedBytes = staging.video?.size || 0;
-        if (staging.audio) task.downloadedBytes += staging.audio.size || 0;
-        task.progress = task.totalBytes ? Math.min(0.98, task.downloadedBytes / task.totalBytes) : 0;
+        // ★ 已下字节**只许前进，不许后退**。
+        //
+        // 「暂停 → 继续」时存在一个瞬间：续传用的 sink 刚建好、还没把已下字节
+        // 真正写回（`sink.size` 由 `openPartial` 回填，而回填发生在 fetchTo 之前），
+        // 此刻算出的 downloadedBytes 会比暂停前**小**。真机实测：暂停前 56.90MB，
+        // 继续后一瞬间显示 48.47MB，进度条从 80% 往回缩到 68%，随后才重新涨上去。
+        //
+        // 这是断点续传的**通病** —— 「已下字节的记账」与「真实落盘」之间有时间差，
+        // 任何按 sink.size 实时算进度的实现都会抖这么一下。数据其实没丢（实测最终
+        // 进度超过暂停前），但用户看到进度条倒退，第一反应就是"续传没生效、又从头下了"。
+        //
+        // 这里用单调不减兜底：宁可让进度条暂时偏保守，也绝不允许它倒退。
+        task.downloadedBytes = nextDownloadedBytes(
+          task.downloadedBytes, staging.video?.size, staging.audio?.size,
+        );
+        task.progress = task.totalBytes
+          ? Math.min(0.98, task.downloadedBytes / task.totalBytes)
+          : 0;
         this.emit(task);
       };
 
@@ -1422,6 +1437,36 @@ export function audioOutputMeta(track) {
   }
   // 杜比全景声是 E-AC-3 装在 MP4 容器里，标准扩展名仍是 .m4a
   return { ext: 'm4a', mime: 'audio/mp4' };
+}
+
+/**
+ * 已下字节的**单调不减**兜底。
+ *
+ * 「暂停 → 继续」时存在一个瞬间：续传用的 sink 刚建好、还没把已下字节真正写回
+ * （`sink.size` 由 `openPartial` 回填，而回填发生在 fetchTo 之前），
+ * 此刻按 sink.size 算出的已下字节会比暂停前**小**。
+ *
+ * 真机实测（2026-09-21）：暂停前 56.90MB，继续后一瞬间显示 48.47MB，
+ * 进度条从 80% 往回缩到 68%，随后才重新涨上去。
+ *
+ * 这是断点续传的**通病** —— 「已下字节的记账」与「真实落盘」之间有时间差，
+ * 任何按 sink.size 实时算进度的实现都会抖这么一下。数据其实没丢
+ * （实测最终进度 86% 超过暂停前 79%），但用户看到进度条倒退，
+ * 第一反应就是"续传没生效、又从头下了" —— 而这恰恰是我们最想证明修好了的那件事。
+ *
+ * 所以：宁可让进度条暂时偏保守，也绝不允许它倒退。
+ *
+ * 抽成纯函数是为了能直接加断言（`refreshProgress` 藏在 `run()` 的闭包里测不到）。
+ *
+ * @param {number} prev 上一次的已下字节
+ * @param {number} [videoSize] 视频轨 sink 的已下字节
+ * @param {number} [audioSize] 音频轨 sink 的已下字节
+ * @returns {number}
+ */
+export function nextDownloadedBytes(prev, videoSize, audioSize) {
+  const next = (Number(videoSize) || 0) + (Number(audioSize) || 0);
+  const before = Number(prev) || 0;
+  return next >= before ? next : before;
 }
 
 /**

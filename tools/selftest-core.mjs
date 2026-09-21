@@ -15,7 +15,7 @@ import { escapeHtml, sanitizeFilename } from '../src/core/util.js';
 import { formUrlEncode, getMixinKey, signParams, resetMixinKey } from '../src/core/wbi.js';
 import { md5 } from '../src/core/md5.js';
 import { av2bv, bv2av, isBvid } from '../src/core/avbv.js';
-import { buildPlan, audioOutputMeta } from '../src/core/engine.js';
+import { buildPlan, audioOutputMeta, nextDownloadedBytes } from '../src/core/engine.js';
 import { pickAudioTrack } from '../src/core/api.js';
 
 let pass = 0;
@@ -246,6 +246,33 @@ check('pickAudioTrack：只有无损轨时 normal 也要能兜底拿到内容', 
   const audios = [{ id: 30251, type: 'flac', bandwidth: 900000 }];
   const picked = pickAudioTrack(audios, { preferLossless: false });
   return eq(picked.id, 30251);
+});
+
+// ★ 已下字节必须单调不减（「暂停 → 继续」时进度条不能倒退）
+//
+// 真机实测（2026-09-21）：暂停前 56.90MB，继续后一瞬间算出 48.47MB，
+// 进度条从 80% 回缩到 68%。数据没丢（最终 86% > 暂停前 79%），
+// 但用户看到倒退就会以为"续传没生效、又从头下了"。
+check('nextDownloadedBytes：算出的比上次小时保持原值（不许倒退）', () => {
+  return eq(nextDownloadedBytes(56_000_000, 48_000_000, 470_000), 56_000_000);
+});
+check('nextDownloadedBytes：算出的比上次大时正常前进', () => {
+  return eq(nextDownloadedBytes(56_000_000, 60_000_000, 470_000), 60_470_000);
+});
+check('nextDownloadedBytes：相等时不回退也不跳变', () => {
+  return eq(nextDownloadedBytes(1000, 600, 400), 1000);
+});
+check('nextDownloadedBytes：从 0 开始正常累加（新任务）', () => {
+  return eq(nextDownloadedBytes(0, 300, 200), 500);
+});
+check('nextDownloadedBytes：undefined / NaN 不污染结果', () => {
+  return eq(nextDownloadedBytes(0, undefined, NaN), 0);
+});
+check('nextDownloadedBytes：只有音频轨时按音频算（视频轨缺席不为 NaN）', () => {
+  return eq(nextDownloadedBytes(0, undefined, 300), 300);
+});
+check('nextDownloadedBytes：只有视频轨时按视频算', () => {
+  return eq(nextDownloadedBytes(0, 500, undefined), 500);
 });
 
 check('audio：无视频轨也不报错（纯音频投稿）', () => {
