@@ -246,9 +246,7 @@ export class DownloadEngine {
     //   （见 popup.js —— 旧实现会写回，导致选一次「仅音频」之后所有下载都变成仅音频）。
     //   所以这里要把 spec 里带的值并进本次运行用的 settings，
     //   后续 buildPlan / 各下载分支 / refinePlanSizes 拿到的就都是同一个值。
-    const settings = task.spec?.downloadMode
-      ? { ...this.settings, downloadMode: task.spec.downloadMode }
-      : this.settings;
+    const settings = resolveTaskSettings(this.settings, task.spec);
     const { api } = this;
     const signal = task.controller.signal;
     const setStatus = (status, phaseText = '') => {
@@ -393,6 +391,13 @@ export class DownloadEngine {
       const separate = plan.mode === 'dash' && settings.downloadMode === 'separate';
       const audioOnly = plan.mode === 'dash' && settings.downloadMode === 'audio';
 
+      // ★ 只有 merge 分支支持断点续传（走 prepareStage）；durl / separate / audio
+      //   每次都是从 0 重下，上轮遗留的 downloadedBytes 必须清零，否则
+      //   nextDownloadedBytes 的单调不减会把它永久保留 → 进度卡在 98%（见 resolveProgressBase）。
+      if (plan.mode === 'durl' || audioOnly || separate) {
+        task.downloadedBytes = resolveProgressBase(task.downloadedBytes, false);
+      }
+
       /* ---------------- 2. 下载 ---------------- */
       setStatus('downloading', '下载中…');
 
@@ -471,6 +476,19 @@ export class DownloadEngine {
           sizeHint: plan.audio.size,
           tempNames,
         });
+        // ★ 直写用户句柄时必须先截断。
+        //
+        // `FileHandleSink.open()` 用 `keepExistingData: true`（续传需要保留已下字节），
+        // 所以写到同名文件是**追加覆盖**语义：新内容更短时，尾部会残留上一轮的字节。
+        // merge 路径由 `mergeInto` 显式截过，仅音频这条直写路径此前没截 ——
+        // 用户改了音质偏好（无损→普通）重试到同一文件时，产物尾部带着上一段垃圾，
+        // 播放器可能报错或读出错误的时长。
+        //
+        // 这里截断是安全的：仅音频**不走断点续传**（见上面 `resolveProgressBase` 的
+        // 清零逻辑），每次都是从头下，不存在"截掉已下字节"的风险。
+        if (typeof out.sink?.truncate === 'function') {
+          await out.sink.truncate(0);
+        }
         staging.audio = out.sink;
         await this.fetchTo({
           urls: [plan.audio.url, ...plan.audio.backupUrls],
@@ -546,6 +564,9 @@ export class DownloadEngine {
         const vPrep = await this.prepareStage({
           task, spec, plan, track: 'v', size: plan.video.size, tempNames,
         });
+        // ★ 清单失效（fresh）→ 本次从 0 重下，上轮字节必须清零；续传（resumed）才保留
+        //   （见 resolveProgressBase —— 否则进度会卡在 98% 不动）。
+        task.downloadedBytes = resolveProgressBase(task.downloadedBytes, vPrep.resumed);
         staging.video = vPrep.sink;
         await this.fetchTo({
           urls: [plan.video.url, ...plan.video.backupUrls],
@@ -565,6 +586,9 @@ export class DownloadEngine {
         const aPrep = await this.prepareStage({
           task, spec, plan, track: 'a', size: plan.audio.size, tempNames,
         });
+        // 同上：音轨 fresh 时清基线。此时视轨已下完的字节由 staging.video.size 兜底，
+        // 下一次 refreshProgress 会把 downloadedBytes 重算为 视轨+音轨（不会丢）。
+        task.downloadedBytes = resolveProgressBase(task.downloadedBytes, aPrep.resumed);
         staging.audio = aPrep.sink;
         await this.fetchTo({
           urls: [plan.audio.url, ...plan.audio.backupUrls],
@@ -652,10 +676,18 @@ export class DownloadEngine {
     if (destination.kind === 'dir' && destination.dir) {
       const handle = await destination.dir.getFileHandle(sanitizeFilename(name), { create: true });
       const sink = await new FileHandleSink(handle).open();
+      // ★ 直写句柄打开后必须真的截断（见 resetSink 注释）。
+      //   FileHandleSink.open() 用 keepExistingData:true，重下/重试写到同一文件、
+      //   而新内容比上一轮短时，尾部会残留旧字节 → "新头 + 旧尾"的坏文件。
+      //   这条路径从不走续传（续传只在 prepareStage 里），所以每次都是 fresh。
+      await resetSink(sink);
       return { sink, direct: true, handle };
     }
     if (destination.kind === 'file' && destination.handle && singleOutput) {
       const sink = await new FileHandleSink(destination.handle).open();
+      // 同上：singleOutput 直写用户文件句柄（仅音频 / durl / merge 的最终产物）也必须截断。
+      //   用户手输的同名文件、或上次失败留下的字节，都可能比本次内容长。
+      await resetSink(sink);
       return { sink, direct: true, handle: destination.handle };
     }
     if (shouldUseMemory(sizeHint)) {
@@ -671,7 +703,10 @@ export class DownloadEngine {
   async finishOutput(out, task, destination, filename, mime) {
     if (out.direct) {
       await out.sink.close();
-      task.outputs.push({ path: filename, bytes: out.sink.size });
+      // ★ singleOutput 直写用户文件句柄时，磁盘名是用户手输的 handle.name，
+      //   不是引擎算出的 filename（见 resolveOutputPath 注释）。
+      const path = resolveOutputPath(destination, out, filename);
+      task.outputs.push({ path, bytes: out.sink.size });
       this.emit(task);
       return;
     }
@@ -1051,7 +1086,10 @@ export class DownloadEngine {
 
   /** 抓取封面 / 弹幕 / 字幕。 */
   async fetchExtras(task, destination, plan, tempNames) {
-    const { settings, api } = this;
+    // ★ 与 run() 同源：必须走 resolveTaskSettings，否则拿的是全局 downloadMode，
+    //   会让 nfoMode 判断与本次实际下载方式分叉（见 resolveTaskSettings 注释）。
+    const settings = resolveTaskSettings(this.settings, task.spec);
+    const api = this.api;
     const spec = task.spec;
 
     const put = async (filename, content, mime = 'text/plain') => {
@@ -1430,13 +1468,65 @@ export function buildPlan(playInfo, settings, spec) {
  * @returns {{ ext: string, mime: string }}
  */
 export function audioOutputMeta(track) {
-  const mime = String(track?.mimeType || track?.mime_type || '').toLowerCase();
+  // ★ 先按 `;` 截断取主类型再**精确**比对，不能子串匹配。
+  //   B 站可能返回带参数的 MIME，如 `audio/mp4; codecs="flac"`（MP4 容器里装 FLAC
+  //   编码）——`includes('flac')` 会把这种 MP4 误判成 .flac，扩展名与真实内容不符。
+  const mime = String(track?.mimeType || track?.mime_type || '').toLowerCase().split(';')[0].trim();
   const type = String(track?.type || '').toLowerCase();
-  if (mime.includes('flac') || type === 'flac') {
+  if (mime === 'audio/flac' || mime === 'audio/x-flac' || type === 'flac') {
     return { ext: 'flac', mime: 'audio/flac' };
   }
   // 杜比全景声是 E-AC-3 装在 MP4 容器里，标准扩展名仍是 .m4a
   return { ext: 'm4a', mime: 'audio/mp4' };
+}
+
+/**
+ * 合法的「下载方式」取值。用于 resolveTaskSettings 的白名单校验。
+ */
+const VALID_DOWNLOAD_MODES = new Set(['merge', 'separate', 'audio', 'durl']);
+
+/**
+ * 合并**任务级**设置覆盖。
+ *
+ * 弹窗里选的「下载方式」是**本次生效**、不写回全局设置，所以运行期需要把
+ * `task.spec.downloadMode` 并进本次使用的 settings。run() 与 fetchExtras() 必须
+ * 用**同一个**函数做这件事，否则两处判断会分叉（fetchExtras 曾因此仍按全局
+ * merge 判断，给「仅音频」产物生成基名对不上的 NFO）。
+ *
+ * ★ downloadMode 必须走**白名单**：storage 残留 / 手改 spec 可能给出 `'audioo'`
+ *   这类**非法但 truthy** 的值。若不校验就并进去，引擎的各分支判断
+ *   （`=== 'audio'` 等）全部落空 → 静默走 merge 分支产出完整视频；
+ *   而 falsy 值（''/undefined）反而安全（会被忽略、回落 base）。
+ *   所以只接受 merge | separate | audio | durl，其余一律忽略。
+ *
+ * @param {object} baseSettings 全局设置
+ * @param {{ downloadMode?: string } | null | undefined} spec 任务规格
+ * @returns {object} 本次运行使用的 settings
+ */
+export function resolveTaskSettings(baseSettings, spec) {
+  const override = spec?.downloadMode;
+  return VALID_DOWNLOAD_MODES.has(override)
+    ? { ...baseSettings, downloadMode: override }
+    : baseSettings;
+}
+
+/**
+ * 决定一条输出记录里该写哪个文件名。
+ *
+ * singleOutput + 用户文件句柄（`destination.kind === 'file'`）时，磁盘上的真实文件名是
+ * **用户在保存对话框里手输的** `destination.handle.name` —— 引擎算出的 `fallback`
+ * （如 `${filename}.flac`）只是"建议名"，用户完全可能改成 `.m4a`。
+ * 面板若显示 fallback，用户按面板去磁盘找文件就会找不到（静默错文件）。
+ *
+ * 其余路径（目录句柄 / OPFS 导出 / 内存）磁盘名就是引擎算出的名字，保持 fallback。
+ *
+ * @param {{ kind?: string }} destination
+ * @param {{ handle?: { name?: string } }} out createOutput 的返回值
+ * @param {string} fallback 引擎算出的文件名
+ */
+export function resolveOutputPath(destination, out, fallback) {
+  if (destination?.kind === 'file' && out?.handle?.name) return out.handle.name;
+  return fallback;
 }
 
 /**
@@ -1467,6 +1557,29 @@ export function nextDownloadedBytes(prev, videoSize, audioSize) {
   const next = (Number(videoSize) || 0) + (Number(audioSize) || 0);
   const before = Number(prev) || 0;
   return next >= before ? next : before;
+}
+
+/**
+ * 续传基线的选择：本次**真的续传**时才保留上一轮的已下字节，否则清零。
+ *
+ * 这是 nextDownloadedBytes 单调不减的**前置条件** —— 只防倒退、不防"该清零没清零"，
+ * 会引出一个比倒退更糟的现象：
+ *
+ *   1. 第一轮下到 60MB 时暂停，`task.downloadedBytes = 60MB` 被保留（见 dashboard
+ *      resumeTask —— 续传场景下这是对的）
+ *   2. 但续传清单**已失效**（TTL 过期 / 大小不匹配 / .part 实际长度对不上）时，
+ *      `openPartial` 会判 fresh 并 truncate(0) → **本次实际是从 0 重下**
+ *   3. 于是新 sink 从 0 起，而基线仍是 60MB → nextDownloadedBytes 永远保留 60MB
+ *      → `progress = min(0.98, 60MB/total)` → 整轮重下进度条**纹丝不动钉在 98%**
+ *
+ * 倒退看得见、会自己恢复；卡死看不出原因，用户只会以为"下载挂了"。
+ *
+ * @param {number} prev 上一轮的已下字节
+ * @param {boolean} resumed 本次该轨是否真的续传（prepareStage/openPartial 的 resumed）
+ * @returns {number} 本次下载的进度基线
+ */
+export function resolveProgressBase(prev, resumed) {
+  return resumed ? (Number(prev) || 0) : 0;
 }
 
 /**

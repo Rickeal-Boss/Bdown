@@ -157,5 +157,56 @@ console.log('\n[5] 敏感权限：manifest 不应多余索取');
   ok('host_permissions 只覆盖 B 站相关域', nonBili.length === 0, nonBili.join(', '));
 }
 
+console.log('\n[6] ★ audioOutputMeta：落盘扩展名/类型必须恒落在白名单内（mimeType 来自服务端，不可信）');
+{
+  const { audioOutputMeta } = await import('../src/core/engine.js');
+  const { normalizePlayInfo } = await import('../src/core/api.js');
+
+  // 它是**最后一道**决定落盘扩展名的闸门：服务端返回的 mimeType 是外部输入，
+  // 而返回值会被直接拼进文件名（`${name}.${ext}`）。安全官已用畸形输入证伪过
+  // 注入风险 —— 这里要锁住的是那个**不变量**：返回值只能是白名单内的两个常量，
+  // 任何输入字节都不许渗进返回值。
+  const EXTS = ['flac', 'm4a'];
+  const MIMES = ['audio/flac', 'audio/mp4'];
+
+  const cases = [
+    ['路径穿越', { mimeType: '../../../../etc/passwd' }],
+    ['命令注入', { mimeType: 'audio/flac"; rm -rf /' }],
+    ['XSS 载荷', { mimeType: 'audio/mp4<script>alert(1)</script>' }],
+    ['CRLF 注入', { mimeType: 'audio/flac\r\nX-Evil: 1' }],
+    ['500 字符超长串', { mimeType: 'A'.repeat(500) }],
+    ['带参数的 MP4（含 flac 字样）', { mimeType: 'audio/mp4; codecs="flac"' }],
+    ['null', null],
+    ['undefined', undefined],
+    ['空对象', {}],
+    ['空数组', []],
+    ['数字', 0],
+  ];
+  for (const [label, track] of cases) {
+    const r = audioOutputMeta(track);
+    ok(`白名单不变量：${label} → ext/mime 均合法`,
+      EXTS.includes(r?.ext) && MIMES.includes(r?.mime),
+      JSON.stringify(r));
+  }
+
+  // ★ D-5：api.js 的 `a.mimeType || a.mime_type` 双读兜底 —— 服务端只给 mime_type
+  //   时必须仍能判出无损轨。只读一种写法的话，会静默退回 .m4a，用户双击打不开。
+  ok('audioOutputMeta 自身兜底：mimeType 为空时读 mime_type',
+    audioOutputMeta({ mimeType: '', mime_type: 'audio/flac' }).ext === 'flac',
+    JSON.stringify(audioOutputMeta({ mimeType: '', mime_type: 'audio/flac' })));
+
+  const info = normalizePlayInfo({
+    dash: {
+      duration: 0,
+      audio: [{ id: 30250, baseUrl: 'https://x.bilivideo.com/a.m4s', bandwidth: 100_000, mimeType: '', mime_type: 'audio/flac' }],
+    },
+  }, 'dash');
+  const tr = info.audios[0];
+  ok('api.js 双读：只给 mime_type 也能取到 audio/flac',
+    tr?.mimeType === 'audio/flac', JSON.stringify(tr));
+  ok('api.js 双读 → audioOutputMeta 判为 .flac（不退化成打不开的 .m4a）',
+    audioOutputMeta(tr).ext === 'flac', JSON.stringify(audioOutputMeta(tr)));
+}
+
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 安全不变量自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);
 process.exit(fail === 0 ? 0 : 1);

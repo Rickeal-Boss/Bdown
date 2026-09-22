@@ -140,6 +140,15 @@ code {
   margin-top: 14px;
 }
 
+/*
+ * 仅音频模式：清晰度与本次下载无关，降透明度提醒用户。
+ * ⚠️ 只做视觉弱化，**不**加 pointer-events: none / disabled ——
+ *    清晰度仍参与文件名模板 {qualityShort}，禁用会让该变量丢失。
+ */
+.section.is-muted {
+  opacity: 0.5;
+}
+
 .section-head {
   display: flex;
   align-items: center;

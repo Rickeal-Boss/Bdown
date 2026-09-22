@@ -53,7 +53,7 @@
         </div>
       </div>
 
-      <div class="section">
+      <div id="qualitySection" class="section">
         <div class="section-head">
           <span class="bd-label">清晰度</span>
           <span id="qualityHint" class="bd-hint"></span>
@@ -64,6 +64,8 @@
       <div class="section">
         <div class="section-head">
           <span class="bd-label">下载方式</span>
+          <!-- 下载方式自 v1.4.25 起「本次生效」，不再写回全局设置 -->
+          <span class="bd-hint">本次生效（不改设置）</span>
         </div>
         <div id="modeGroup" class="segmented">
           <label><input type="radio" name="mode" value="merge" /><span>合并为 MP4</span></label>

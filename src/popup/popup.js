@@ -4,7 +4,7 @@
 
 import { BiliApi, pickVideoTrack, pickAudioTrack, pickExactTrack } from '../core/api.js';
 import { QUALITIES, qualityShort } from '../core/quality.js';
-import { loadSettings, saveSettings } from '../core/settings.js';
+import { loadSettings, saveSettings, MODE_HINTS, AUDIO_UNAVAILABLE_HINT, estimateSizeBytes } from '../core/settings.js';
 import { extractVideoId, formatBytes, formatDuration, parseRangeExpr, sanitizeFilename, applyTemplate, formatNumber, escapeHtml, warn } from '../core/util.js';
 import { parseUgcSeason, isBatchableSeason, seasonToSpecs } from '../core/season.js';
 
@@ -194,12 +194,10 @@ function buildQualityOptions() {
       quality: q,
       label: extra.label || QUALITIES[q]?.label || `清晰度 ${q}`,
       short: qualityShort(q),
-      // ★ 「仅音频」模式下只算音轨，别把视频大小也算进去 ——
-      //   否则弹窗显示的「预计 X MB」比实际产物大一个数量级，
-      //   用户会以为下载出错了。
-      size: currentMode() === 'audio'
-        ? (bestAudio?.size || 0)
-        : (video ? (video.size || 0) + (bestAudio?.size || 0) : 0),
+      // ★ 体积口径随下载方式变化（仅音频只算音轨），实现见 settings.js 的
+      //   estimateSizeBytes —— 抽成纯函数才能被单测锁定。切换下载方式后必须重算，
+      //   否则这里算出的数字不会被刷新（重算点在 bindEvents 的 mode change 处理里）。
+      size: estimateSizeBytes(currentMode(), video?.size, bestAudio?.size),
       // ★ 只认"精确存在"。accept_quality 会虚报（实测未登录时宣称
       // [116,80,64,32,16] 而 dash.video 只有 [32,16]），不能作为可用性依据。
       available: !!video,
@@ -234,16 +232,33 @@ function buildQualityOptions() {
   return list.sort((a, b) => b.quality - a.quality);
 }
 
-function render() {
-  const info = videoInfo;
-  $('cover').src = info.pic || '';
-  $('title').textContent = info.title || '';
-  const owner = info.owner?.name ? `UP：${info.owner.name}` : '';
-  const dur = formatDuration(info.pages?.[currentSpec.pageIndex]?.duration || info.duration || 0);
-  $('subTitle').textContent = [owner, `${info.pages?.length || 1} 个分P`, dur].filter(Boolean).join(' · ');
-  $('stats').textContent = `${info.bvid || ''}${info.aid ? ` · av${info.aid}` : ''}`;
+/**
+ * 按当前下载方式同步弹窗 UI：模式说明文案 + 清晰度区视觉弱化。
+ *
+ * 文案取自 settings.js 的 MODE_HINTS（**单一来源**）—— 此前这段文案在本文件里
+ * 抄了两份（render() 与 radio 的 change 事件），改一处忘另一处必然漂移。
+ */
+function syncModeUi(mode) {
+  $('modeHint').textContent = MODE_HINTS[mode] || '';
+  // 仅音频模式与清晰度无关，弱化清晰度区提醒用户它不参与本次下载。
+  // ⚠️ 只降透明度，**不能 disabled** —— 清晰度仍参与文件名模板 {qualityShort}，
+  //    禁用会让该变量丢失，文件名与用户预期不符。
+  $('qualitySection').classList.toggle('is-muted', mode === 'audio');
+}
 
-  // 清晰度
+/**
+ * 渲染清晰度列表（含选中档位的决定与兜底）—— render() 与「切换下载方式」共用。
+ *
+ * ★ 为什么必须能单独调用：每档的「预计 X MB」口径**随下载方式变化**
+ *   （仅音频只算音轨，见 settings.js 的 estimateSizeBytes）。切换下载方式后若不重跑
+ *   本函数，列表里的体积会停留在切换前的口径（merge 含视频），比实际产物大一个数量级，
+ *   用户会以为要下整个视频。
+ *
+ * ⚠️ 本函数**不重置** selectedQuality：切换模式时用户已选的档位必须保留
+ *   （仅音频下清晰度不参与下载，但仍参与文件名模板 {qualityShort}）。
+ *   只有选中档位确实不可用时才回落到最高可用档。
+ */
+function renderQualityList() {
   const options = buildQualityOptions();
   const highestAvailable = options.find((o) => o.available)?.quality || 0;
   if (!selectedQuality) {
@@ -285,18 +300,26 @@ function render() {
 
   const missing = options.filter((o) => !o.available && o.needVip).map((o) => o.label);
   $('qualityHint').textContent = missing.length ? `需大会员：${missing.join('、')}` : '';
+}
+
+function render() {
+  const info = videoInfo;
+  $('cover').src = info.pic || '';
+  $('title').textContent = info.title || '';
+  const owner = info.owner?.name ? `UP：${info.owner.name}` : '';
+  const dur = formatDuration(info.pages?.[currentSpec.pageIndex]?.duration || info.duration || 0);
+  $('subTitle').textContent = [owner, `${info.pages?.length || 1} 个分P`, dur].filter(Boolean).join(' · ');
+  $('stats').textContent = `${info.bvid || ''}${info.aid ? ` · av${info.aid}` : ''}`;
+
+  // 清晰度（体积口径随下载方式变化，渲染逻辑见 renderQualityList）
+  renderQualityList();
 
   // 下载方式
   const mode = settings.downloadMode;
   document.querySelectorAll('input[name="mode"]').forEach((r) => {
     r.checked = r.value === mode;
   });
-  $('modeHint').textContent = {
-    merge: '下载 DASH 音视频后无损合并为单个 MP4（推荐，支持全部清晰度）',
-    separate: '分别保存 video.mp4 与 audio.m4a，自行用播放器/ffmpeg 处理',
-    audio: '只下载音轨并保存为 .m4a（B 站音轨本身是 fMP4，直接可播，无需转码）',
-    durl: '直接下载单文件 MP4，无需合并；但清晰度上限较低（通常 720P/1080P）',
-  }[mode];
+  syncModeUi(mode);
 
   // 分P
   const pages = info.pages || [];
@@ -467,9 +490,10 @@ function currentMode() {
 /**
  * 选了「仅音频」但这个视频**没有独立音轨**。
  *
- * 典型是老视频 / 单文件直下（durl）资源：只有一条含音视频的整轨，
- * 拿不出纯音频。此时 engine 会静默退回下载完整视频 —— 用户选了「仅音频」
- * 却拿到一个 MP4，会以为扩展坏了。这里提前说明。
+ * 典型是老视频 / 单文件直下（durl）资源：只有一条含音视频的整轨，拿不出纯音频。
+ * ⚠️ 此时 engine 的 buildPlan 会**直接抛错**（`if (!audio) throw`），任务转 error、
+ *    没有任何产物 —— 并不会退回去下完整视频。所以这里只能提示用户自己改模式，
+ *    绝不能承诺「将下载完整视频」（详见 settings.js 的 AUDIO_UNAVAILABLE_HINT）。
  */
 function audioUnavailable() {
   return currentMode() === 'audio' && !(playInfo?.audios?.length);
@@ -485,7 +509,7 @@ function updateSummary() {
     ${currentMode() === 'durl' ? '<br><span class="bd-hint">单文件直下模式的实际清晰度以接口返回为准</span>' : ''}
     ${currentMode() === 'audio' ? '<br><span class="bd-hint">仅音频模式只下载音轨，与上方清晰度无关</span>' : ''}
     ${audioUnavailable()
-      ? '<br><span class="bd-hint">⚠ 该视频没有独立音轨（多为老视频/单文件直下），无法只下载音频，将下载完整视频</span>'
+      ? `<br><span class="bd-hint">${escapeHtml(AUDIO_UNAVAILABLE_HINT)}</span>`
       : ''}`;
   $('btnStart').disabled = specs.length === 0;
 }
@@ -548,12 +572,11 @@ function bindEvents() {
   document.querySelectorAll('input[name="mode"]').forEach((r) => {
     r.addEventListener('change', async () => {
       settings.downloadMode = r.value;
-      $('modeHint').textContent = {
-        merge: '下载 DASH 音视频后无损合并为单个 MP4（推荐，支持全部清晰度）',
-        separate: '分别保存 video.mp4 与 audio.m4a，自行用播放器/ffmpeg 处理',
-        audio: '只下载音轨并保存为 .m4a（B 站音轨本身是 fMP4，直接可播，无需转码）',
-        durl: '直接下载单文件 MP4，无需合并；但清晰度上限较低（通常 720P/1080P）',
-      }[r.value];
+      syncModeUi(r.value);
+      // ★ 每档的「预计 X MB」口径随下载方式变化（仅音频只算音轨），必须重算，
+      //   否则列表里的体积停留在切换前的 merge 口径、比实际产物大一个数量级。
+      //   重渲染不会重置 selectedQuality（仅音频下清晰度仍参与文件名 {qualityShort}）。
+      renderQualityList();
       updateSummary();
     });
   });

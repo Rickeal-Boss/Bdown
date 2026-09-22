@@ -8,7 +8,7 @@
 
 import { DownloadEngine, Task } from '../core/engine.js';
 import { BiliApi } from '../core/api.js';
-import { loadSettings, saveSettings, onSettingsChanged } from '../core/settings.js';
+import { loadSettings, saveSettings, onSettingsChanged, savePickerHint } from '../core/settings.js';
 import { OpfsWorkspace } from '../core/sink.js';
 import { qualityShort } from '../core/quality.js';
 import { formatBytes, formatSpeed, formatEta, log } from '../core/util.js';
@@ -201,34 +201,6 @@ function updateCounts() {
  * 任务调度
  * ------------------------------------------------------------------ */
 
-/**
- * 按「下载方式」给出保存对话框的建议文件名与类型过滤。
- *
- * 「仅音频」时必须建议音频扩展名：该模式是 singleOutput，engine 会直接写进
- * 用户选中的句柄，建议名错了的话磁盘文件名与面板显示就会不一致。
- */
-function savePickerHint(mode, name) {
-  if (mode === 'audio') {
-    return {
-      // 无损轨存 .flac、其余 .m4a；两者都给，用户也能手动改
-      suggested: `${name}.m4a`,
-      types: [
-        { description: '音频文件', accept: { 'audio/mp4': ['.m4a'], 'audio/flac': ['.flac'] } },
-      ],
-    };
-  }
-  if (mode === 'separate') {
-    return {
-      suggested: `${name}.video.mp4`,
-      types: [{ description: 'MP4 视频', accept: { 'video/mp4': ['.mp4'] } }],
-    };
-  }
-  return {
-    suggested: `${name}.mp4`,
-    types: [{ description: 'MP4 视频', accept: { 'video/mp4': ['.mp4'] } }],
-  };
-}
-
 async function pickDestination(taskCount) {
   if (settings.saveMode === 'downloads') return { kind: 'downloads' };
 
@@ -245,7 +217,8 @@ async function pickDestination(taskCount) {
     // 原来一律建议 `.mp4`、类型也只给 `video/mp4`。而「仅音频」模式是
     // `singleOutput`，engine 会直接写进用户选的这个句柄 —— 于是磁盘上是
     // `xxx.mp4` 却只有音频，面板里显示的却是 `xxx.m4a`，两边对不上。
-    // 无损轨还要建议 `.flac`（与 audioOutputMeta 保持一致）。
+    // 无损轨是否建议 `.flac` 无法在此判定（plan 与音轨 mimeType 都还没有），
+    // 由 savePickerHint 在 description 里提示用户按实际音质手动改。
     const mode = task?.spec?.downloadMode || settings.downloadMode;
     const name = task?.filename || 'bilibili';
     const { suggested, types } = savePickerHint(mode, name);

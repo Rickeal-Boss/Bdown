@@ -1,14 +1,19 @@
 /**
- * 复现「暂停 → 继续却从头下载」的链路测试。
+ * 断点续传链路的**集成**测试（不联网）。
  *
- * 为什么必须写这个测试：`openPartial` 的判定依赖真实的 OPFS 行为
- * （文件长度随随机偏移写入而增长、清单与 .part 是两个文件分开读写），
- * 这些在纯逻辑测试里全部被绕开了。上一轮 `planResume` / `mismatchWithDisk`
- * 的测试全是纯函数，所以**判据写错了也照样全绿** —— 直到用户在真机上
- * 遇到"暂停后继续却从头下"才发现。
+ * 它跑的是「OPFS 上的续传清单读写链路」：用一份内存版 OPFS 把真实语义跑出来
+ * —— 写入偏移会扩展文件长度、未写入的空洞由 0 填充（与 File System Access API 一致）
+ * —— 覆盖「写入 .part → 落清单 → 重开 → planResume 判定」的全过程，
+ * 外加一条**根因断言**：[6] 锁住「估算 size 与探测 size 不一致时，
+ * 写进清单的必须是探测到的真实值」，即 v1.4.24 修复的那个根因。
  *
- * 这里用一份内存版 OPFS 把真实行为跑出来：写入偏移会扩展文件长度，
- * 未写入的空洞由 0 填充（与 File System Access API 一致）。
+ * ⚠️ 它**不**完整复现「暂停 → 继续却从头下载」这个 bug 的触发路径：
+ *    那条路径横跨 engine.run / prepareStage / fetchTo 三层，本文件只覆盖到
+ *    fetchTo 与续传清单这一段（不触及 run/prepareStage）。
+ *
+ * 为什么要坚持用内存版 OPFS 而不是纯函数：上一轮 `planResume` / `mismatchWithDisk`
+ * 的测试全是纯函数，绕开了 OPFS 真实语义，**判据写错了也照样全绿** —— 直到用户在
+ * 真机上遇到"暂停后继续却从头下"才发现。所以这里宁可多搭一层假文件系统。
  *
  * 运行：node tools/test-resume-restart.mjs
  */
@@ -209,6 +214,75 @@ console.log('\n[5] 判据自检：mismatchWithDisk 不能把"正常续传"误判
   const r3 = planResume({ size: SIZE, ranges: [{ start: 0, end: 3 * CHUNK }], updatedAt: Date.now() },
     SIZE, { actualSize: CHUNK });
   ok('文件长度 < 已完成字节 → 判残缺重下', r3.kind === 'fresh', `${r3.kind}`);
+}
+
+console.log('\n[6] ★ 续传清单写入的 size 必须是探测到的真实值（不能是带宽估算值）');
+{
+  // 这是 v1.4.24 修复的**根因**，此前零覆盖（`grep onResolvedSize tools/` 曾为 0 命中）。
+  //
+  // 链路：B 站 playurl 不给 DASH 轨的 size，api.js 只能用 `bandwidth × duration / 8`
+  // 估算（误差可达数个百分点）。`downloadRanged` 内部会先发 `Range: bytes=0-0`
+  // 探测出精确大小，engine.fetchTo 必须把它回写进自己的 `total`，否则暂停时写进
+  // 续传清单的就是**估算值**；下次「继续」时 prepareStage 传入的是**真实值** →
+  // canResume 判「大小不匹配」→ truncate(0) → 已下好的字节全被抹掉、从头再下。
+  //
+  // 这里构造「估算 ≠ 探测」并断言落清单的 size 是真实值。
+  const ESTIMATE = 1000; // 估算值（api.js 的 bandwidth × duration / 8）
+  const REAL = 1200;     // 服务端 Content-Range 探测出的真实大小
+
+  const { DownloadEngine } = await import('../src/core/engine.js');
+  const { setFetchImpl } = await import('../src/core/downloader.js');
+  const { DEFAULT_SETTINGS } = await import('../src/core/settings.js');
+
+  setFetchImpl(async (_url, init) => {
+    const range = String(init?.headers?.Range || '');
+    const m = /bytes=(\d+)-(\d+)/.exec(range);
+    const s = m ? Number(m[1]) : 0;
+    const e = m ? Number(m[2]) : REAL - 1;
+    return {
+      ok: true,
+      status: 206,
+      headers: {
+        get: (h) => {
+          const k = String(h).toLowerCase();
+          if (k === 'accept-ranges') return 'bytes';
+          if (k === 'content-range') return `bytes ${s}-${e}/${REAL}`;
+          if (k === 'content-length') return String(e - s + 1);
+          return null;
+        },
+      },
+      arrayBuffer: async () => new Uint8Array(e - s + 1).buffer,
+    };
+  });
+
+  const writes = [];
+  const store = {
+    write: async (_key, meta) => { writes.push(meta); },
+    clear: async () => {},
+  };
+
+  const engine = new DownloadEngine({
+    settings: { ...DEFAULT_SETTINGS, concurrency: 2, retries: 0 },
+    onUpdate: () => {},
+  });
+  const sink = { size: 0, writeAt: async () => {}, close: async () => {} };
+
+  try {
+    await engine.fetchTo({
+      urls: ['https://cdn.test/a.m4s'],
+      size: ESTIMATE, // 估算值
+      sink,
+      signal: new AbortController().signal,
+      resume: { store, key: 'k_size', ranges: [] },
+    });
+  } finally {
+    setFetchImpl(null);
+  }
+
+  ok('探测完成后确实落了续传清单', writes.length > 0, '清单一次都没写');
+  ok('★ 清单里的 size 一律是探测到的真实值 1200（不能出现估算值 1000）',
+    writes.every((w) => w.size === REAL),
+    `写过的 size：${JSON.stringify(writes.map((w) => w.size))} —— 落成 1000 会让下次续传判「大小不匹配」而 truncate(0)`);
 }
 
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 暂停/继续 链路自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);

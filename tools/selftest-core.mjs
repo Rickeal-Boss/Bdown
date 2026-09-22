@@ -11,12 +11,16 @@
  * 运行：node tools/selftest-core.mjs
  */
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { escapeHtml, sanitizeFilename } from '../src/core/util.js';
 import { formUrlEncode, getMixinKey, signParams, resetMixinKey } from '../src/core/wbi.js';
 import { md5 } from '../src/core/md5.js';
 import { av2bv, bv2av, isBvid } from '../src/core/avbv.js';
-import { buildPlan, audioOutputMeta, nextDownloadedBytes } from '../src/core/engine.js';
+import { buildPlan, audioOutputMeta, nextDownloadedBytes, resolveTaskSettings, resolveOutputPath, resolveProgressBase, DownloadEngine } from '../src/core/engine.js';
 import { pickAudioTrack } from '../src/core/api.js';
+import { savePickerHint, MODE_HINTS, AUDIO_UNAVAILABLE_HINT } from '../src/core/settings.js';
 
 let pass = 0;
 let fail = 0;
@@ -220,6 +224,177 @@ check('audioOutputMeta：无信息时兜底 .m4a（不返回空扩展名）', ()
   return eq(audioOutputMeta(null).ext, 'm4a');
 });
 
+// ★ C-1：MIME 必须按 `;` 截断后**精确**比对主类型，不能子串匹配。
+//
+// B 站可能返回带参数的 MIME，如 `audio/mp4; codecs="flac"`（MP4 容器里装 FLAC 编码）。
+// 旧实现用 `mime.includes('flac')`，会把这种 MP4 误判成 .flac —— 扩展名与真实内容
+// 不符，播放器按 .flac 解析失败。以下 6 组为回归用例。
+check('audioOutputMeta：audio/flac + flac → .flac', () => {
+  const m = audioOutputMeta({ mimeType: 'audio/flac', type: 'flac' });
+  return eq(m.ext, 'flac');
+});
+check('audioOutputMeta：audio/mp4 + audio → .m4a', () => {
+  const m = audioOutputMeta({ mimeType: 'audio/mp4', type: 'audio' });
+  return eq(m.ext, 'm4a');
+});
+check('audioOutputMeta：带参数的 audio/mp4; codecs="flac" 必须判为 .m4a（不能被子串误判）', () => {
+  const m = audioOutputMeta({ mimeType: 'audio/mp4; codecs="flac"', type: 'audio' });
+  return eq(m.ext, 'm4a');
+});
+check('audioOutputMeta：audio/x-flac（无 type）→ .flac', () => {
+  const m = audioOutputMeta({ mimeType: 'audio/x-flac', type: '' });
+  return eq(m.ext, 'flac');
+});
+check('audioOutputMeta：audio/mp4 + dolby → .m4a', () => {
+  const m = audioOutputMeta({ mimeType: 'audio/mp4', type: 'dolby' });
+  return eq(m.ext, 'm4a');
+});
+check('audioOutputMeta：无 mime、type=flac 时兜底 .flac', () => {
+  const m = audioOutputMeta({ mimeType: '', type: 'flac' });
+  return eq(m.ext, 'flac');
+});
+
+// ★ C-2：任务级 settings 覆盖必须抽成**同一个**纯函数，run() 与 fetchExtras 共用。
+//
+// 旧实现里 run() 就地做了 `spec.downloadMode` 覆盖，而 fetchExtras 内部
+// `const { settings } = this` 拿的是全局 settings —— 用户全局 merge + 本次选「仅音频」
+// 时，fetchExtras 仍按 merge 判断，会给仅音频产物生成一个基名对不上的 NFO。
+check('resolveTaskSettings：spec.downloadMode 覆盖本次，其余字段原样保留', () => {
+  const r = resolveTaskSettings({ downloadMode: 'merge', saveNfo: true }, { downloadMode: 'audio' });
+  return eq([r.downloadMode, r.saveNfo], ['audio', true]);
+});
+check('resolveTaskSettings：spec 无 downloadMode 时原样返回全局', () => {
+  return eq(resolveTaskSettings({ downloadMode: 'merge' }, {}).downloadMode, 'merge');
+});
+check('resolveTaskSettings：downloadMode 为空串不覆盖（空串不等于有效值）', () => {
+  return eq(resolveTaskSettings({ downloadMode: 'merge' }, { downloadMode: '' }).downloadMode, 'merge');
+});
+check('resolveTaskSettings：spec 为 null 时原样返回全局', () => {
+  return eq(resolveTaskSettings({ downloadMode: 'merge' }, null).downloadMode, 'merge');
+});
+// ★ C-7：非法但 truthy 的 downloadMode（storage 残留，如 'audioo'）必须被忽略。
+//   否则引擎会静默落到 merge 分支产出完整视频 —— falsy 值反而安全，truthy 非法值更危险。
+check('resolveTaskSettings：非法 truthy downloadMode 被忽略，回落 base', () => {
+  return eq(resolveTaskSettings({ downloadMode: 'merge' }, { downloadMode: 'audioo' }).downloadMode, 'merge');
+});
+check('resolveTaskSettings：四种合法 downloadMode 都能覆盖', () => {
+  const base = { downloadMode: 'merge' };
+  const got = ['merge', 'separate', 'audio', 'durl']
+    .map((m) => resolveTaskSettings(base, { downloadMode: m }).downloadMode);
+  return eq(got, ['merge', 'separate', 'audio', 'durl']);
+});
+
+// ★ C-5：singleOutput 直写用户文件句柄时，磁盘上的真实文件名是**用户手输的**
+//   handle.name，而不是引擎算出的 `${filename}.${ext}`。面板若显示后者，用户按面板
+//   去磁盘找文件会找不到（静默错文件）。
+check('resolveOutputPath：singleOutput + 文件句柄 → 用磁盘真实名（handle.name）', () => {
+  return eq(resolveOutputPath({ kind: 'file' }, { handle: { name: 'xxx.m4a' } }, 'xxx.flac'), 'xxx.m4a');
+});
+check('resolveOutputPath：dir 目标 → 保持引擎算出的名字', () => {
+  return eq(resolveOutputPath({ kind: 'dir' }, { handle: { name: 'x.flac' } }, 'x.flac'), 'x.flac');
+});
+check('resolveOutputPath：非直写（导出/内存）→ 保持引擎名字', () => {
+  return eq(resolveOutputPath({ kind: 'downloads' }, {}, 'x.flac'), 'x.flac');
+});
+check('resolveOutputPath：kind=file 但句柄无名 → 兜底引擎名字', () => {
+  return eq(resolveOutputPath({ kind: 'file' }, { handle: {} }, 'x.flac'), 'x.flac');
+});
+
+// ★ C-6：直写句柄（createOutput 的 direct 分支）打开后必须 truncate(0)。
+//
+// FileHandleSink.open() 用 keepExistingData:true —— 重试/重下写到同一句柄、而新内容
+// 比上一轮短时，尾部会残留旧字节，产出"新头 + 旧尾"的坏文件。merge 路径在 mergeInto
+// 里显式截断了，但仅音频等直写路径此前漏了截断。用桩句柄断言 truncate 确实发出。
+{
+  const makeWritable = (ops) => ({
+    async write(op) { ops.push(op); },
+    async close() {},
+    async abort() {},
+  });
+  const engine = new DownloadEngine({ api: {}, settings: {} });
+
+  const fileOps = [];
+  const fileHandle = { name: 'x.m4a', async createWritable() { return makeWritable(fileOps); } };
+  const fileOut = await engine.createOutput({
+    task: { id: 't-file' },
+    destination: { kind: 'file', handle: fileHandle },
+    name: 'x.flac',
+    singleOutput: true,
+    sizeHint: 1024,
+    tempNames: [],
+  });
+  await fileOut.sink.close();
+
+  const dirOps = [];
+  const dirHandle = { name: 'x.flac', async createWritable() { return makeWritable(dirOps); } };
+  const dir = { async getFileHandle() { return dirHandle; } };
+  const dirOut = await engine.createOutput({
+    task: { id: 't-dir' },
+    destination: { kind: 'dir', dir },
+    name: 'x.flac',
+    singleOutput: true,
+    sizeHint: 1024,
+    tempNames: [],
+  });
+  await dirOut.sink.close();
+
+  const isTruncate = (o) => o && o.type === 'truncate' && o.size === 0;
+  check('createOutput：singleOutput 直写文件句柄时必须先 truncate(0)', () =>
+    (fileOps.some(isTruncate) ? '' : '未截断，重试会残留上一轮尾部字节'));
+  check('createOutput：目录直写句柄也必须先 truncate(0)', () =>
+    (dirOps.some(isTruncate) ? '' : '未截断，重下会残留上一轮尾部字节'));
+}
+
+// ★ C-4：清单失效（fresh）时必须把 downloadedBytes 清零。
+//
+// v1.4.26 的 nextDownloadedBytes 只防"倒退"、没防"该清零时没清零"：
+// 清单失效 → openPartial 判 fresh → 本次从 0 重下，而 task.downloadedBytes 仍是上轮的
+// 60MB → 单调不减把它永久保留 → progress 恒为 0.98，整轮重下进度条纹丝不动。
+// 所以「本次是否续传」必须显式决定基线：resumed 才保留，否则清零。
+check('resolveProgressBase：清单失效（fresh）→ 清零，不保留上轮字节', () => {
+  return eq(resolveProgressBase(60_000_000, false), 0);
+});
+check('resolveProgressBase：清单有效（resumed）→ 保留断点字节', () => {
+  return eq(resolveProgressBase(60_000_000, true), 60_000_000);
+});
+check('resolveProgressBase：resumed 但 prev 非法 → 0', () => {
+  return eq(resolveProgressBase(undefined, true), 0);
+});
+check('C-4 场景B（清单失效重下）：进度随真实字节增长，不卡在上轮 60MB', () => {
+  const base = resolveProgressBase(60_000_000, false);
+  return eq(nextDownloadedBytes(base, 1_000_000, 0), 1_000_000);
+});
+check('C-4 场景A（清单有效续传）：续传瞬间不得回退（56.9MB→48.47MB 保持 56.9MB）', () => {
+  const base = resolveProgressBase(56_900_000, true);
+  return eq(nextDownloadedBytes(base, 48_470_000, 0), 56_900_000);
+});
+
+// ★ C-3：savePickerHint 的 description 不能假装能自动判断无损。
+//
+// 它在 run() 之前调用，此时 plan 与音轨 mimeType 都还不存在，无法判定无损与否。
+// 正确做法是给出可操作提示（让用户按实际音质手动改 .flac），而不是硬编码承诺。
+check('savePickerHint：audio 的 description 必须提示可手动改为 .flac', () => {
+  const hint = savePickerHint('audio', 'x');
+  if (!hint.types[0].description.includes('.flac')) {
+    return `description 未提示 .flac：${hint.types[0].description}`;
+  }
+  return '';
+});
+check('savePickerHint：audio 的 accept 同时含 .m4a 与 .flac', () => {
+  const hint = savePickerHint('audio', 'x');
+  const exts = Object.values(hint.types[0].accept).flat();
+  return eq([exts.includes('.m4a'), exts.includes('.flac')], [true, true]);
+});
+check('savePickerHint：separate → x.video.mp4', () => {
+  return eq(savePickerHint('separate', 'x').suggested, 'x.video.mp4');
+});
+check('savePickerHint：merge → x.mp4', () => {
+  return eq(savePickerHint('merge', 'x').suggested, 'x.mp4');
+});
+check('savePickerHint：未知 mode 兜底 x.mp4', () => {
+  return eq(savePickerHint(undefined, 'x').suggested, 'x.mp4');
+});
+
 // ★ 「普通音轨」设置项必须真的避开无损/杜比。
 //
 // 改动前普通 AAC 的 rank 恒为 4，而 flac=3、dolby=2 —— 升序取第一个的话，
@@ -323,6 +498,154 @@ check('bv2av 也会对伪 BV 抛错', () => {
     return '';
   }
 });
+
+console.log('\n[8] 弹窗文案不变量 —— 不得对用户说谎（B-1 / B-2 / B-3 / B-4）');
+{
+  // 弹窗是 DOM 模块，无法在 Node 里 import。办法是把文案抽成 settings.js 里的
+  // 纯常量（上面已 import），UI 只做引用；再对 popup.html / popup.js / popup.css
+  // 做静态不变量断言，把「文案不许再说谎」锁死，防止下次重构悄悄改回去。
+  const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const read = (rel) => {
+    try { return readFileSync(join(ROOT, rel), 'utf8'); } catch { return ''; }
+  };
+  const POPUP_JS = read('src/popup/popup.js');
+  const POPUP_HTML = read('src/popup/popup.html');
+  const POPUP_CSS = read('src/popup/popup.css');
+  /** 仅音频模式下加在清晰度区上的弱化 class（JS 与 CSS 必须同名）。 */
+  const MUTED_CLASS = 'is-muted';
+
+  // —— B-1：仅音频文案必须同时说清 .m4a 与 .flac，且不得承诺「直接可播」——
+  //
+  // 扩展名由音轨真实类型决定（engine.js audioOutputMeta）：普通 AAC / 杜比 → .m4a，
+  // Hi-Res 无损 → .flac。旧文案写死 .m4a，用户遇到无损轨时按 .m4a 打开会失败。
+  check('MODE_HINTS 四种下载方式齐全', () =>
+    eq(['merge', 'separate', 'audio', 'durl']
+      .every((k) => typeof MODE_HINTS[k] === 'string' && MODE_HINTS[k].length > 0), true));
+  check('MODE_HINTS.audio 同时说明 .m4a 与 .flac', () => {
+    const t = MODE_HINTS.audio;
+    return t.includes('.m4a') && t.includes('.flac')
+      ? '' : `扩展名说明不完整（.m4a=${t.includes('.m4a')} / .flac=${t.includes('.flac')}）：${t}`;
+  });
+  check('MODE_HINTS.audio 不得承诺「直接可播」（无损产物未真机验证）', () => {
+    const banned = ['直接可播', '实测可用', '已真机验证'].filter((w) => MODE_HINTS.audio.includes(w));
+    return banned.length ? `出现无法保证的承诺：${banned.join(' / ')}` : '';
+  });
+
+  // —— B-2：无独立音轨时必须给**可操作**指引，不得承诺「将下载完整视频」——
+  //
+  // engine.buildPlan 在 audio 模式下 `if (!audio) throw` 是无条件抛错：
+  // 实际什么都下不了，任务直接转 error。承诺会退回去下完整视频是假话。
+  check('AUDIO_UNAVAILABLE_HINT 不得承诺「将下载完整视频」', () =>
+    AUDIO_UNAVAILABLE_HINT.includes('将下载完整视频')
+      ? 'engine 在 audio 模式下无条件抛错，实际没有任何产物，此承诺为假' : '');
+  check('AUDIO_UNAVAILABLE_HINT 必须给出替代操作指引「合并为 MP4」', () =>
+    AUDIO_UNAVAILABLE_HINT.includes('合并为 MP4')
+      ? '' : `缺少可操作的替代指引：${AUDIO_UNAVAILABLE_HINT}`);
+
+  // —— 文案必须只有一份来源（popup.js 两处引用同一常量，不得再各抄一份）——
+  check('popup.js 引用 MODE_HINTS / AUDIO_UNAVAILABLE_HINT 单一来源', () =>
+    POPUP_JS.includes('MODE_HINTS') && POPUP_JS.includes('AUDIO_UNAVAILABLE_HINT')
+      ? '' : 'popup.js 未引用抽出的常量');
+  check('popup.js 不再残留手抄的旧四模式文案副本', () =>
+    POPUP_JS.includes('B 站音轨本身是 fMP4')
+      ? '仍存在手抄副本，改一处忘另一处必然漂移' : '');
+
+  // —— B-3：下载方式「本次生效」，弹窗 UI 必须说明 ——
+  check('popup.html 下载方式区必须标注「本次」生效', () => {
+    if (!POPUP_HTML) return 'popup.html 读不到';
+    const idx = POPUP_HTML.indexOf('下载方式');
+    if (idx < 0) return '未找到「下载方式」区块';
+    const end = POPUP_HTML.indexOf('id="pagesSection"', idx);
+    const section = POPUP_HTML.slice(idx, end > idx ? end : idx + 900);
+    return section.includes('本次')
+      ? '' : '下载方式只影响当次下载、不写回全局，UI 未说明会让用户以为设置丢失';
+  });
+
+  // —— B-4：仅音频模式弱化清晰度区（只做视觉弱化，不得禁用）——
+  //
+  // 不能 disabled：清晰度仍参与文件名模板 {qualityShort}，禁用会让变量丢失。
+  check('popup.html 清晰度区有可定位的 id', () =>
+    POPUP_HTML.includes('id="qualitySection"') ? '' : '清晰度区缺少 id，无法按模式弱化');
+  check('popup.js 在仅音频模式下给清晰度区加弱化 class', () =>
+    POPUP_JS.includes('qualitySection') && POPUP_JS.includes(MUTED_CLASS)
+      ? '' : 'popup.js 未按模式弱化清晰度区');
+  check('popup.css 为该弱化 class 定义了透明度（视觉弱化而非禁用）', () =>
+    new RegExp(`\\.${MUTED_CLASS}\\s*\\{[^}]*opacity`).test(POPUP_CSS)
+      ? '' : `popup.css 缺少 .${MUTED_CLASS} 的 opacity 样式`);
+}
+
+console.log('\n[9] 切换下载方式后清晰度列表体积必须重算（B-5）');
+{
+  // 缺陷：buildQualityOptions() 的 size 已按 currentMode() 算（仅音频只算音轨），
+  // 但 mode radio 的 change 只调 updateSummary()、**不重渲染清晰度列表** ——
+  // 切换后列表里的「预计 X MB」仍是 merge 口径（含视频），比实际产物大一个数量级。
+  //
+  // 所以断言分两层：
+  //   ① 体积口径本身抽成可导出纯函数，断言它**随 mode 变化**（这是"体积该变"的依据）
+  //   ② 接线：mode change 必须真的重渲染列表，且不重置已选清晰度
+  const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const read = (rel) => {
+    try { return readFileSync(join(ROOT, rel), 'utf8'); } catch { return ''; }
+  };
+  const POPUP_JS = read('src/popup/popup.js');
+
+  // 动态取命名空间：若 estimateSizeBytes 尚未导出，下面每条断言各自失败并给出原因，
+  // 而不是让整个套件在 import 阶段崩掉（那样看不到任何信息）。
+  const settingsPure = await import('../src/core/settings.js');
+  const estimateSizeBytes = settingsPure.estimateSizeBytes;
+  const hasFn = typeof estimateSizeBytes === 'function';
+  const NEED = 'settings.js 未导出 estimateSizeBytes（体积口径无法被单测锁定）';
+
+  check('estimateSizeBytes 已导出为纯函数', () => (hasFn ? '' : NEED));
+  check('estimateSizeBytes：仅音频只算音轨，不含视频体积', () =>
+    (!hasFn ? NEED : eq(estimateSizeBytes('audio', 1000, 200), 200)));
+  check('estimateSizeBytes：merge 算视频+音轨', () =>
+    (!hasFn ? NEED : eq(estimateSizeBytes('merge', 1000, 200), 1200)));
+  // ★ 核心：同一组入参下，两种 mode 的体积必须不同 —— 这就是「切换后必须重算」的依据。
+  check('estimateSizeBytes：同一入参下 audio 与 merge 必须给出不同体积', () => {
+    if (!hasFn) return NEED;
+    const a = estimateSizeBytes('audio', 1000, 200);
+    const m = estimateSizeBytes('merge', 1000, 200);
+    return a !== m ? '' : `两种口径算出相同体积 ${a}，切换模式后 UI 无需刷新（与事实不符）`;
+  });
+  check('estimateSizeBytes：无视频轨时按 0 处理，不产生 NaN', () =>
+    (!hasFn ? NEED : eq(estimateSizeBytes('merge', undefined, 200), 0)));
+  check('estimateSizeBytes：仅音频且无音轨 → 0（不返回 NaN/undefined）', () =>
+    (!hasFn ? NEED : eq(estimateSizeBytes('audio', undefined, undefined), 0)));
+  check('estimateSizeBytes：separate / durl 与 merge 同口径（都要下视频轨）', () =>
+    (!hasFn ? NEED : eq([
+      estimateSizeBytes('separate', 1000, 200),
+      estimateSizeBytes('durl', 1000, 200),
+    ], [1200, 1200])));
+
+  // —— 接线：mode change 必须真的重渲染清晰度列表 ——
+  // 取最后一处 mode radio 绑定（bindEvents 里的那个）到其后 1200 字符作为处理块。
+  const modeBlock = (() => {
+    const i = POPUP_JS.lastIndexOf('input[name="mode"]');
+    return i < 0 ? '' : POPUP_JS.slice(i, i + 1200);
+  })();
+
+  check('popup.js 的 mode change 处理会重渲染清晰度列表', () => {
+    if (!modeBlock) return '未找到 mode radio 的事件绑定块';
+    return modeBlock.includes('renderQualityList(')
+      ? '' : '切换模式后未重渲染清晰度列表，「预计 X MB」会停留在旧口径';
+  });
+  check('清晰度列表渲染被抽成单一函数，由 render() 与 mode change 共用', () => {
+    const n = (POPUP_JS.match(/renderQualityList/g) || []).length;
+    return n >= 3 ? '' : `renderQualityList 仅出现 ${n} 次（需 ≥3：定义 1 + render() 1 + change 1）`;
+  });
+  check('体积计算走 estimateSizeBytes 单一来源（不再内联按 mode 的三元）', () =>
+    POPUP_JS.includes('estimateSizeBytes(') ? '' : 'popup.js 未复用 estimateSizeBytes');
+  check('切换模式不得重置已选清晰度（仅音频下它仍参与文件名 {qualityShort}）', () => {
+    if (!modeBlock) return '未找到 mode radio 的事件绑定块';
+    // 注意：这里**不能用正则字面量**。lint-noundef.mjs 判断「/ 是正则还是除号」
+    // 只看前一个非空白字符，`return /x/` 这种写法它认不出来，会把正则内容当代码扫，
+    // 报 selectedQuality / resetSelection「可能未定义」的假阳性。
+    const dense = modeBlock.replace(/\s+/g, '');
+    const bad = ['selectedQuality=0', 'resetSelection('].filter((s) => dense.includes(s));
+    return bad.length ? `切换模式时重置了已选清晰度：${bad.join(' / ')}` : '';
+  });
+}
 
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 核心自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);
 process.exit(fail === 0 ? 0 : 1);

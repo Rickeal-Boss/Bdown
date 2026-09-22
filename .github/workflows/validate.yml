@@ -144,6 +144,13 @@ jobs:
       - name: 控制字符检查（禁止 tab/LF/CR 之外的 C0 控制字符）
         run: node tools/lint-control-chars.mjs
 
+      # 文案类改动同样需要可执行断言，否则下次重构能悄悄改回去。
+      # 锁两件容易脱节的事：① 仅音频产物扩展名（普通 .m4a / 无损 .flac）
+      # ② 弹窗的下载方式自 v1.4.25 起「本次生效、不写回全局设置」。
+      # 附带守护：README 不得声称「已真机验证」（.flac 至今未真机验证）。
+      - name: 文档一致性检查（README / 设置页文案 vs 代码实际行为）
+        run: node tools/lint-docs-consistency.mjs
+
       # 元检查：本工作流是**逐条列文件**的，新增测试若忘了加进来，
       # CI 会"绿着"却 0 覆盖。这条断言所有 tools/test-*.mjs 与
       # tools/lint-*.mjs 都已被本工作流引用。

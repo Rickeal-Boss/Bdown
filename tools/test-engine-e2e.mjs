@@ -322,6 +322,53 @@ async function main() {
     ok('separate：拿到 2 个产物 Blob', false, `实际 ${sep.length}`);
   }
 
+  console.log('\n[4] ★ 任务级 downloadMode 覆盖：全局 merge，任务选 audio');
+  {
+    // 弹窗里选的「下载方式」只对本次生效、**不写回全局设置**（见 run() 的注释）。
+    // 旧用例里 `settings.downloadMode` 与 `spec.downloadMode` 恒为同值，
+    // 所以「任务级覆盖」这条逻辑从没被真正测过 —— 引擎若忽略它，这里会退回
+    // 全局 merge 分支：产出合并后的 .mp4 + 一份 NFO，下面几条断言立刻红。
+    currentMode = 'dash';
+    produced.length = 0;
+    const engine = makeEngine('merge'); // 全局 = merge
+    const task = engine.addTask(
+      {
+        bvid: 'BV1xx411c7mD',
+        cid: 62131,
+        pageIndex: 0,
+        quality: 0,
+        title: '任务级音频覆盖',
+        downloadMode: 'audio', // ★ 任务级覆盖，与全局不同
+      },
+      { title: '任务级音频覆盖' },
+    );
+    await engine.run(task, { kind: 'downloads' });
+
+    ok('任务级 audio：任务状态 = done', task.status === 'done', `实际 status=${task.status} error=${task.error}`);
+    const paths = task.outputs.map((o) => String(o.path || ''));
+    const mediaPaths = paths.filter((p) => !p.endsWith('.nfo'));
+    const nfoPaths = paths.filter((p) => p.endsWith('.nfo'));
+
+    ok('任务级 audio：只产 1 个媒体文件（不是 merge 的合并产物）',
+      mediaPaths.length === 1, `实际 ${mediaPaths.length}：${JSON.stringify(paths)}`);
+    ok('任务级 audio：产物扩展名是 .m4a（按 audio 执行）',
+      mediaPaths.length === 1 && mediaPaths[0].endsWith('.m4a'), JSON.stringify(mediaPaths));
+    ok('任务级 audio：不产 NFO（audio 模式不该产）', nfoPaths.length === 0, JSON.stringify(nfoPaths));
+    ok('任务级 audio：只写了 1 个产物', produced.length === 1, `实际 ${produced.length}`);
+
+    // 最强的一条：产物字节数必须**等于音轨**、且**不等于视频轨** ——
+    // 直接证明引擎没有偷偷把视频轨也下下来再丢掉。
+    const audioBlob = produced[0];
+    if (audioBlob) {
+      const bytes = new Uint8Array(await audioBlob.arrayBuffer());
+      ok('任务级 audio：产物字节数 = 音轨字节数', bytes.length === AUDIO.length, `${bytes.length} vs ${AUDIO.length}`);
+      ok('任务级 audio：产物字节数 ≠ 视频轨字节数（视频轨根本没下）',
+        bytes.length !== VIDEO.length, `${bytes.length} vs ${VIDEO.length}`);
+    } else {
+      ok('任务级 audio：拿到产物 Blob', false, '没有捕获到 Blob');
+    }
+  }
+
   console.log(`\n${fail === 0 ? '✅' : '❌'} 引擎端到端测试完成，失败 ${fail} 项（通过 ${pass}）\n`);
   // 必须显式退出：exportFile 注册了 24h 的 revokeObjectURL 定时器
   process.exit(fail === 0 ? 0 : 1);
