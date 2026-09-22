@@ -10,7 +10,8 @@
  *      但设置页从未说明，用户会困惑「我在弹窗选了仅音频，怎么这里还是合并」
  *
  * 文案类改动同样需要可执行的失败断言，否则下次重构照样能悄悄改回去。
- * 本文件就是这组断言。**它不检查代码逻辑，只锁文案不变量。**
+ * 本文件就是这组断言。**它不检查代码逻辑，只锁「文档 / 元信息」不变量 ——
+ * 包括文案（[1]~[5]）与版本号两处一致性（[6]）。**
  *
  * ⚠️ 措辞纪律：本项目对「未真机验证」有严格纪律。`.flac` 产物至今**未在真机验证**
  * （只在代码与测试层验证过），所以文档**不得**出现「已真机验证」「实测可用」这类
@@ -94,6 +95,19 @@ console.log('\n[5] 设置页下载方式区必须说明「弹窗选择本次生�
   const card = cardSection(text, 'data-key="downloadMode"');
   ok('下载方式卡片内出现「本次」字样', card.includes('本次'),
     'v1.4.25 起弹窗的下载方式只影响当次下载、不改全局，设置页必须说明，否则用户会困惑');
+}
+
+console.log('\n[6] 版本号必须两处一致（manifest.json 与 package.json）');
+{
+  // package.json 不进产物（打包脚本已排除），所以漂移不会影响用户，
+  // 但会让**开发者**误判当前产物版本 —— 每次发版只改 manifest 是常态，
+  // 这条断言把「另一处也要跟着改」变成硬性要求。
+  const manifestRaw = read('manifest.json');
+  const pkgRaw = read('package.json');
+  const mv = manifestRaw ? JSON.parse(manifestRaw).version : null;
+  const pv = pkgRaw ? JSON.parse(pkgRaw).version : null;
+  ok('manifest.json 与 package.json 的 version 一致', mv !== null && mv === pv,
+    `版本漂移：manifest=${mv} / package.json=${pv} —— 发版时两处必须一起改`);
 }
 
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 文档一致性检查${fail === 0 ? '通过' : `失败 ${fail} 项`}（通过 ${pass}）\n`);
