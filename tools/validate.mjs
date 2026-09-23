@@ -168,6 +168,7 @@ const coreModules = [
   'src/core/subtitle.js',
   'src/core/settings.js',
   'src/core/api.js',
+  'src/core/lifecycle.js',
   'src/core/engine.js',
 ];
 

@@ -33,7 +33,7 @@ const DIST = join(ROOT, 'dist');
  * 变红**不是失败而是提醒**：请确认是不是你预期的变化，是就更新这里的基线。
  * 历史上三次污染都是靠"文件数不对"才被发现的，所以这条宁可吵也不要静默。
  */
-const BASELINE = Number(process.env.BDOWN_PKG_BASELINE ?? 43);
+const BASELINE = Number(process.env.BDOWN_PKG_BASELINE ?? 44);
 
 console.log('\n[1] 找到最新的打包产物');
 const manifest = JSON.parse(readFileSync(join(ROOT, 'manifest.json'), 'utf8'));
