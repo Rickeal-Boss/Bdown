@@ -19,7 +19,7 @@
  * 运行：node tools/test-spec-key.mjs
  */
 
-import { specKey, SpecKeyRegistry, ensureSpecComplete } from '../src/core/engine.js';
+import { specKey, SpecKeyRegistry, ensureSpecComplete, Task } from '../src/core/engine.js';
 
 let pass = 0;
 let fail = 0;
@@ -167,6 +167,50 @@ console.log('\n[5] 课程入口（cheeseId）—— 回归守卫：v1.4.29 的 F
   const junk = { pageIndex: 0 };
   await ensureSpecComplete(junk, spy);
   ok('无上游标识时短路、不发任何请求', called === 0, `发了 ${called} 次请求`);
+}
+
+console.log('\n[6] 番剧「恢复 ↔ 重新派发」指纹同形（v1.4.31 数据一致性 F2 的回归守卫）');
+{
+  const reg = new SpecKeyRegistry();
+  // 番剧页派发：spec 只有 epId（无 bvid / aid / cid）
+  const task = new Task({ epId: 101, pageIndex: 0 }, { title: '第1话' });
+  reg.claim(task);
+  ok('fresh 派发后指纹被占住', reg.has({ epId: 101, pageIndex: 0 }));
+
+  const api = makeApi({
+    season: {
+      result: {
+        season_title: '某番剧',
+        episodes: [{ ep_id: 101, cid: 555, bvid: 'BV1bangumi1', aid: 9, title: '第1话', cover: '' }],
+      },
+    },
+  });
+  await ensureSpecComplete(task.spec, api);
+  ok('运行中 spec 被原地补全（bvid/aid/cid 齐了，前置条件成立）',
+    !!task.spec.bvid && !!task.spec.aid && Number(task.spec.cid) > 0);
+
+  // ★ 关键前提：番剧补全会写回 bvid/aid —— 按**补全后**的 spec 重算出的键
+  //   与 claim 时的键不同。这正是「恢复时重算不可靠」的根据。
+  ok('番剧补全后按 spec 重算的键已与 claim 键不同（证明重算不可靠）',
+    specKey(task.spec) !== task.specKey,
+    '重算键竟与 claim 键相同 —— 本断言失去意义，请检查 specKey 是否又变了口径');
+
+  // toRecord → 恢复（loadPendingTasks 的恢复路径）
+  const rec = task.toRecord();
+  ok('toRecord 持久化了 specKey', rec.specKey === task.specKey,
+    `rec.specKey=${JSON.stringify(rec.specKey)} ≠ task.specKey=${JSON.stringify(task.specKey)}`);
+  const restored = new Task(rec.spec || {}, {});
+  restored.id = rec.id;
+  if (rec.specKey) restored.specKey = rec.specKey;
+  reg.claim(restored); // 恢复的 paused / pending / error 任务占位
+  ok('恢复的任务占的是**同一把**键（重算的话就是另一把）',
+    restored.specKey === task.specKey,
+    `${JSON.stringify(restored.specKey)} vs ${JSON.stringify(task.specKey)}`);
+  ok('集合里始终只有一把键', reg.keys.size === 1, `实际 ${reg.keys.size}`);
+  // ★ 最终防线：恢复后同视频 fresh 重新派发（原始形态，只有 epId）必须被拦下 ——
+  //   旧形态下这里放行 → 两个任务并发写同一个 resumeKey 的 .part → 坏文件。
+  ok('恢复后同视频重新派发被拦截（不再建第二个任务）', reg.has({ epId: 101, pageIndex: 0 }),
+    '重新派发被放行 —— 恢复键与派发键不同形，两个任务会并发写同一 .part');
 }
 
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 指纹自检${fail === 0 ? '通过' : `失败 ${fail} 项`}（通过 ${pass}）\n`);

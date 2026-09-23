@@ -6,13 +6,21 @@ on:
   pull_request:
   workflow_dispatch:
 
+# ★ v1.4.31（安全审计 F-003）：最小权限。本工作流只读代码 + 上传 artifact，
+#   不需要 contents:write，更不需要任何其它 scope。不声明的话 GitHub 会给
+#   默认 token 一大把写权限（含 GITHUB_TOKEN 写仓库）。
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # ★ v1.4.31（安全审计 F-003）：第三方/官方 action 一律 pin 到 commit SHA
+      #   （tag 可被上游移动劫持，SHA 不可变）。注释里保留版本号便于人工核对。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.x
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.x
         with:
           node-version: '22'
 
@@ -177,6 +185,13 @@ jobs:
       - name: 弹窗 id 一致性检查（JS 引用 vs HTML 定义，防「引用不存在的 DOM」）
         run: node tools/lint-popup-ids.mjs
 
+      # v1.4.31 P0 的直接产物：dashboard.js 顶层在 specRegistry 声明前就把它传给
+      # createTaskFinisher → 模块求值 TDZ → 下载中心整页白屏，而 35 个套件没有
+      # 任何一个 import 页面模块，CI 全绿。本套件用最小桩真的执行一遍 5 个页面
+      # 模块的模块求值，顶层 TDZ / ReferenceError / TypeError 从此活不过 CI。
+      - name: 页面模块加载冒烟（模块求值零异常，防「顶层求值即崩」类白屏）
+        run: node tools/test-page-modules.mjs
+
       # 元检查：本工作流是**逐条列文件**的，新增测试若忘了加进来，
       # CI 会"绿着"却 0 覆盖。这条断言所有 tools/test-*.mjs 与
       # tools/lint-*.mjs 都已被本工作流引用。
@@ -221,7 +236,7 @@ jobs:
         run: node tools/test-release-gate.mjs
 
       - name: 上传打包产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.x
         with:
           name: Bdown-extension-v${{ github.run_number }}
           path: dist/*.zip

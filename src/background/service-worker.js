@@ -21,13 +21,27 @@ const DASHBOARD_URL = chrome.runtime.getURL('src/dashboard/index.html');
  * （不需要真正的锁）。链上任何一步失败都会 `.catch` 掉，不会把后续写入卡死。
  */
 let pendingTasksWriteChain = Promise.resolve();
+/** 队列上限：与 taskHistory 的 200 条对齐。合集批量一次几十条，远够用。 */
+const MAX_PENDING_TASKS = 200;
 function appendPendingTasks(tasks) {
   if (!tasks || !tasks.length) return Promise.resolve();
   pendingTasksWriteChain = pendingTasksWriteChain
     .catch(() => {})
     .then(async () => {
       const { pendingTasks: existing = [] } = await chrome.storage.local.get('pendingTasks');
-      await chrome.storage.local.set({ pendingTasks: [...existing, ...tasks] });
+      // ★ v1.4.31（安全审计 F-002）：**入队前设上限**。
+      //
+      //   manifest 声明了 `unlimitedStorage`（配额闸对这里失效），而
+      //   `OPEN_DASHBOARD` 的 payload.tasks 直接 `[...existing, ...tasks]` ——
+      //   扩展自有上下文里的异常循环能把 storage 无界写穿。三道收口：
+      //     ① 只收对象条目；② 总量钳到 MAX_PENDING_TASKS；③ 满了就丢新的
+      //   （与 taskHistory 的 slice(-200) 保留新记录方向一致：丢最不该进的尾部）。
+      const room = Math.max(0, MAX_PENDING_TASKS - existing.length);
+      const incoming = tasks
+        .filter((t) => t && typeof t === 'object')
+        .slice(0, room);
+      if (!incoming.length) return;
+      await chrome.storage.local.set({ pendingTasks: [...existing, ...incoming] });
     });
   return pendingTasksWriteChain;
 }

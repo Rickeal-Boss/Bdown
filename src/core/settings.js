@@ -126,25 +126,34 @@ const ENUM_KEYS = {
   saveMode: ['ask', 'downloads'],
 };
 
-/** 读取全部设置（合并默认值）。 */
-export async function loadSettings() {
-  const stored = await chrome.storage.local.get(KEYS);
-  const merged = { ...DEFAULT_SETTINGS, ...stored };
-  // 归一化数值字段：chrome.storage 不改类型，但 options/popup 的
-  // select / input 直接 .value 时是**字符串**，写盘后再读回仍是字符串。
-  // 这对大多数字段无害，但对清晰度相关字段（如 defaultQuality）极危险：
-  //   - JS 里 `!"0" === false`（非空字符串是 truthy）
-  //   - 所以 `if (!quality)` 不会把字符串 "0" 识别为"自动"
-  //   - 直接走到降级分支，accept 最小档（360P）就成了默认结果
-  // 统一 Number()，让所有下游逻辑（buildPlan 等）拿到的都是数字。
-  // v1.4.30：在 Number() 之外补「有限性 + 区间钳制」——见 NUMERIC_RANGES 注释。
+/**
+ * 把任意来源的原始设置（storage 读出的全量 / onChanged 的零散补丁）
+ * 归一化成**合法设置**（v1.4.31 数据一致性 F5）。
+ *
+ * ★ 为什么必须是单一出口：v1.4.30 的钳制只做在 `loadSettings()` 里，
+ *   而「设置页改一项 → onSettingsChanged → engine.settings」这条**实时变更通道**
+ *   消费的是未归一化的 `v.newValue` —— storage 已被写坏（concurrency:"NaN"）时，
+ *   用户在设置页随便改一项，就把 "NaN" 灌进了引擎：分片 worker 循环 0 次、
+ *   任务标 done、静默产出 0 字节文件（正是钳制注释里要防的形态，绕了个道又进来）。
+ *   loadSettings 与 onSettingsChanged 必须走同一个函数，否则就是「复制两份必漏一份」。
+ *
+ * 数值字段：统一 Number()，让所有下游逻辑（buildPlan 等）拿到的都是数字。
+ * chrome.storage 不改类型，但 options/popup 的 select / input 直接 .value 时是
+ * **字符串**，写盘后再读回仍是字符串。这对大多数字段无害，但对清晰度相关字段
+ * （如 defaultQuality）极危险：JS 里 `!"0" === false`（非空字符串是 truthy），
+ * `if (!quality)` 不会把字符串 "0" 识别为"自动"，直接走到降级分支，
+ * accept 最小档（360P）就成了默认结果。
+ */
+function normalizeSettings(raw) {
+  const merged = { ...DEFAULT_SETTINGS, ...(raw || {}) };
+  // v1.4.30：Number() 之外补「有限性 + 区间钳制」—— 见 NUMERIC_RANGES 注释。
   for (const [k, [lo, hi]] of Object.entries(NUMERIC_RANGES)) {
-    const raw = merged[k];
-    if (raw === undefined || raw === null || raw === '') {
+    const rawValue = merged[k];
+    if (rawValue === undefined || rawValue === null || rawValue === '') {
       merged[k] = DEFAULT_SETTINGS[k];
       continue;
     }
-    const n = Number(raw);
+    const n = Number(rawValue);
     if (!Number.isFinite(n)) {
       merged[k] = DEFAULT_SETTINGS[k];
       continue;
@@ -165,6 +174,12 @@ export async function loadSettings() {
   return merged;
 }
 
+/** 读取全部设置（合并默认值）。 */
+export async function loadSettings() {
+  const stored = await chrome.storage.local.get(KEYS);
+  return normalizeSettings(stored);
+}
+
 /** 写入部分设置。 */
 export async function saveSettings(patch) {
   await chrome.storage.local.set(patch);
@@ -176,7 +191,12 @@ export function onSettingsChanged(callback) {
     if (area !== 'local') return;
     const patch = {};
     for (const [k, v] of Object.entries(changes)) {
-      if (KEYS.includes(k)) patch[k] = v.newValue;
+      if (!KEYS.includes(k)) continue;
+      // ★ v1.4.31（数据一致性 F5）：实时变更与 loadSettings 走**同一个**归一化出口。
+      //   之前直传 v.newValue —— 钳制/布尔严格化/枚举白名单全部形同虚设，
+      //   "NaN" 之类的脏值能绕过 loadSettings 直接灌进引擎。
+      //   用单键补丁过一遍 normalizeSettings，取回归一化后的该字段。
+      patch[k] = normalizeSettings({ [k]: v.newValue })[k];
     }
     if (Object.keys(patch).length) callback(patch);
   };

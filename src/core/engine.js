@@ -136,6 +136,14 @@ export class Task {
       // 恢复出来的 Task 若不认得自己占用过哪些 .part，点「移除」时 discardResume
       // 就没东西可清 —— 那些 .part 会永久占着 OPFS，还可能被下一次同内容下载续上。
       resumeKeys: Array.isArray(this.resumeKeys) ? [...this.resumeKeys] : [],
+      // ★ v1.4.31（数据一致性 F2）：**claim 时的那把指纹键必须跟着走**。
+      //
+      //   指纹键在 claim() 时按**原始 spec** 算出并记在 task.specKey 上；而
+      //   `spec` 字段持久化的是被 ensureSpecComplete **原地补全后**的 spec
+      //   （番剧会补出 bvid/aid/epId）。恢复时若按 rec.spec 重算键，得到的是
+      //   另一把键 → 「恢复的任务」与「同视频 fresh 重新派发」互不设防 →
+      //   两个任务并发写同一个 .part。带着这把键恢复，两端才真正同形。
+      specKey: this.specKey || '',
     };
   }
 }
@@ -1122,12 +1130,22 @@ export class DownloadEngine {
       await resetSink(sink);
       // 回退顺序下载时不能续传（会重下整个文件），清掉清单避免半份残留
       if (resume) await resume.store.clear(resume.key).catch(() => {});
+      // ★ v1.4.31（回归审查 P2）：**内存里的 doneRanges 也必须一并清空**。
+      //
+      //   resetSink 把文件截回 0、store.clear 把清单删了，但 doneRanges 还揣着
+      //   分片阶段完成的旧区间。顺序下载上报的进度不带 range/ranges，
+      //   wrappedProgress 不会重新记账 —— 于是顺序下载期间用户一暂停，
+      //   abortExit → persistProgress 会把那些**早已作废**的区间写回清单，
+      //   下次「继续」跳过这些区间 = 跳过从未写过的字节（清单说谎）。
+      doneRanges = [];
       // ★ v1.4.30：顺序下载是 fetchTo 的**第四条出口**，此前不经过 abortExit。
       //   暂停 / 取消正好落在这条路径上时，DownloadAborted 直接穿出 fetchTo，
       //   sink 不关、已完成区间不落清单 —— 正是 v1.4.29 修的那两条重试子路径
       //   之外的漏网一条（同一处收口又漏了一个出口）。
+      //   v1.4.31：onProgress 换成 wrappedProgress —— 现在虽然拿不到区间
+      //   （downloadSequential 不上报 range），但若未来它开始上报，记账自动接上。
       try {
-        return await downloadSequential({ urls: list, sink, signal, onProgress });
+        return await downloadSequential({ urls: list, sink, signal, onProgress: wrappedProgress });
       } catch (e3) {
         if (e3 instanceof DownloadAborted) await abortExit();
         throw e3;

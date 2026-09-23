@@ -518,8 +518,15 @@ export class BiliApi {
    */
   async seasonInfo(seasonIdOrEpId, { epId } = {}) {
     const params = {};
-    if (Number(seasonIdOrEpId) > 0) params.season_id = seasonIdOrEpId;
-    if (Number(epId) > 0) params.ep_id = epId;
+    // ★ v1.4.31（安全审计 F-001）：`Number(x) > 0` 判定过松 —— '1e999'（Infinity）、
+    //   '12.5'、'0x10'、' 12 ' 全都 >0 放行，而且 params 里写回的是**原始串**。
+    //   改成 isSafeInteger 归一化：判定与写回用同一个规范化后的数字。
+    //   非法值不进 params；两者皆缺时 get() 的 idKeys 闸门（-400）会拦，
+    //   请求根本不会发出去。
+    const sid = Number(seasonIdOrEpId);
+    if (Number.isSafeInteger(sid) && sid > 0) params.season_id = sid;
+    const eid = Number(epId);
+    if (Number.isSafeInteger(eid) && eid > 0) params.ep_id = eid;
     return this.get('/pgc/view/web/season', { params });
   }
 
@@ -528,7 +535,10 @@ export class BiliApi {
    * 对齐 DownKyi 的 `CheeseInfo`。**未真机验证**（课程通常是付费内容）。
    */
   async cheeseSeason(epId) {
-    const res = await this.get('/pugv/view/web/season', { params: { ep_id: epId } });
+    // ★ v1.4.31（安全审计 F-001）：同 seasonInfo —— 归一化后再进 query。
+    const eid = Number(epId);
+    const params = Number.isSafeInteger(eid) && eid > 0 ? { ep_id: eid } : {};
+    const res = await this.get('/pugv/view/web/season', { params });
     if (!res) return null;
     return {
       title: res.title || res.season_title || '',

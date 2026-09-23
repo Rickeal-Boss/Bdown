@@ -1,3 +1,75 @@
+## [1.4.31] - 2026-09-24
+
+> **v1.4.30 的第二轮审查收口**（劣化回归 + 数据一致性 + 安全三路子代理回传，其余四路因限流中断后对修复后版本重派）。
+> 本轮最重要的发现是一个 P0：**v1.4.30 的下载中心在模块加载第一毫秒就整页崩溃**，
+> 而 35 个测试套件与 CI 全部全绿 —— 因为没有任何一个套件会 import `dashboard.js`。
+> 「抽取到可测模块」解决了一个盲区，却在同一类盲区上埋了颗新的雷。
+
+### 🔴 P0
+
+1. **下载中心整页白屏（模块求值 TDZ）**。`dashboard.js` 把
+   `createTaskFinisher({ registry: specRegistry })` 写在 `const specRegistry` 声明
+   **之前** —— 对象字面量当场求值 `specRegistry`，命中 `const` 暂时性死区，抛
+   `ReferenceError: Cannot access 'specRegistry' before initialization`。
+   后果：任务列表不渲染、`init()` 不执行、所有按钮无响应、派发的任务永远无人消费
+   —— **核心主路径全断**。
+   修复：声明上移；并新增 **`tools/test-page-modules.mjs`**（页面模块加载冒烟）——
+   用最小桩真的执行一遍 5 个页面模块的模块求值，顶层 TDZ / ReferenceError /
+   TypeError 从此活不过 CI。断言非空对照已验证：对 v1.4.30 的 dashboard.js 副本
+   该套件精准转红（报错定位到第 335 行）。
+
+### 🟠 P1
+
+2. **新接受的任务零持久化 → 「点了下载却什么都没有」**（数据一致性 F1）。
+   SW 的 `consumePendingTasks` 是「读走即删」，条目消失后任务只存在于
+   dashboard 内存里；默认 `saveMode='ask'` 下任务必然停在 pending 等用户点
+   「开始」—— 此时关掉标签页（或被 Chrome 内存回收），pendingTasks 已空、
+   taskHistory 里也没有，**重开也找不回来**。`persistHistory` 全库原本只有
+   3 个调用点，全都发生在任务有状态之后。修复：`acceptPending` 建完任务立即
+   `persistHistory()`；`loadPendingTasks` 的恢复集合加入 `pending`。
+3. **番剧任务的指纹「恢复 ↔ 重新派发」不同形 → 可并发写同一 `.part`**（数据一致性 F2）。
+   v1.4.30 把 `cid` 移出指纹是对的，但番剧分支又把 `bvid`/`aid` 原地补写进 spec：
+   fresh 派发时 claim 的键只有 `epId`，恢复时按补全后的 spec 重算出的键含
+   `bvid`/`aid` —— 两把键互不设防，重新派发 + 点「继续」= 两个任务并发写同一个
+   `resumeKey` 的 `.part/.json`（静默坏文件）。修复：**指纹键本身持久化** ——
+   `Task.toRecord()` 带上 `specKey`，恢复时直接复用，不再重算
+   （`test-spec-key` [6] 补 7 条断言锁死）。
+
+### 🟠 P2
+
+- **顺序回退出口的续传清单说谎**：分片失败回退顺序下载时 `resetSink` +
+  `store.clear` 已执行，但内存里的 `doneRanges` 未清空 —— 顺序下载期间暂停时
+  `abortExit` 会把作废区间写回清单，下次「继续」跳过从未写过的字节。
+  回退前显式 `doneRanges = []`，并把 `downloadSequential` 的 onProgress 换成
+  记账版 `wrappedProgress`。
+- **恢复的 error 任务不占指纹**：error 任务的 `.part/.json` 刻意保留给「重试」，
+  但恢复时只 claim `paused` —— 重新派发同视频 + 点「重试」仍是两路并发。
+  恢复判据放宽为 `paused || pending || (error && resumeKeys.length)`。
+- **设置实时变更通道绕过全部校验**（数据一致性 F5）：v1.4.30 的钳制只做在
+  `loadSettings()`，`onSettingsChanged` 直传 `v.newValue` —— storage 已写坏时
+  用户在设置页改任意一项就把 `"NaN"` 灌进引擎（分片 worker 循环 0 次、
+  任务标 done、静默产出 0 字节文件）。归一化抽成 `normalizeSettings()`
+  单一出口，两条通道共用；`content.js` 的实时布尔消费同步严格化。
+- **workflow 加固**（安全 F-003）：三个官方 action 从 tag 引用 pin 到 commit SHA；
+  补 `permissions: contents: read` 最小权限块。
+
+### 🟡 P3 / 加固
+
+- **持久化失败对用户可见**（数据一致性 F3）：`persistHistory` 失败原本只进
+  console —— 它是任务唯一的持久化落点，失败即「关页即蒸发」且无感。
+  `onError` 对该步单独 toast。
+- **重复派发不再静默吞掉**：指纹命中时此前直接 `continue` 连 toast 都没有；
+  现在提示「相同任务已在列表中（N 个）」。
+- **`btnClean` 拆开两样东西的活跃判据**：`error` 任务持有的是 `bdown-resume`
+  （留给重试），并不在写 `bdown-tmp` —— 合并判定导致列表里有一个失败任务时
+  两样都清不了，按钮退化为永远弹提示。现在 tmp 只看「在跑」，resume 才看 error。
+- **`seasonInfo` / `cheeseSeason` 数值归一化**（安全 F-001）：`Number(x) > 0`
+  放行 `'1e999'`（Infinity）/ `'12.5'` / `'0x10'` 且把**原始串**写进 query；
+  改 `Number.isSafeInteger` 归一化，判定与写回用同一个数字。
+- **`pendingTasks` 追加上限**（安全 F-002）：`unlimitedStorage` 解除了配额闸，
+  `OPEN_DASHBOARD` 的 tasks 无上界直拼。现在钳到 200 条（与 taskHistory 对齐）、
+  只收对象条目。
+
 ## [1.4.30] - 2026-09-23
 
 > **七路子代理深度审查**（产品 / 安全 / 运行时 / 质量 / 设计 / 数据一致性 / 契约）的修复收口。

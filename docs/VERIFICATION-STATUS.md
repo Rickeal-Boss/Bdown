@@ -1,8 +1,36 @@
 # 修复验证状态台账
 
-**最新**：v1.4.30（2026-09-23）。v1.4.21 台账见下方历史章节；v1.4.22–1.4.29 的
+**最新**：v1.4.31（2026-09-24）。v1.4.21 台账见下方历史章节；v1.4.22–1.4.30 的
 版本级验证状态以 CHANGELOG 对应条目为准。
 **原则**：区分「已实测验证」「静态确认」「待测」三类。**不接受"改了就是已修"**。
+
+---
+
+## v1.4.31 第二轮审查收口的验证状态
+
+### 已实测验证（Verified — 本机真实跑过）
+
+| 项 | 验证方式 | 结果 |
+|---|---|---|
+| **P0：dashboard 模块求值零异常** | `tools/test-page-modules.mjs`（最小桩 import 全部 5 个页面模块） | ✅ 5/5 通过 |
+| **变异对照：v1.4.30 的 dashboard.js** | `git show HEAD:...` 写入仓库外副本 + `BDOWN_PAGE_ROOT` 指向副本重跑 | ✅ 精准转红（`ReferenceError: specRegistry` @ :335）→ 修复版转绿，全程不碰工作树 |
+| **指纹「恢复 ↔ 重新派发」同形** | `tools/test-spec-key.mjs` [6]（Task + toRecord 往返 + 恢复 claim + has 拦截） | ✅ 35 项通过（28→35） |
+| **番剧补全后重算键 ≠ claim 键** | `test-spec-key` [6] 前提断言 | ✅ 证明「重算不可靠」，持久化 specKey 是必要修复 |
+| 全量套件 | `for f in tools/test-*.mjs tools/lint-*.mjs tools/selftest-*.mjs` | ✅ 36 套件全绿（新增 1 个） |
+| 发布门禁 / 包产物 | `node tools/package.mjs` + `test-release-gate.mjs` | ✅ 见 CHANGELOG（44 文件基线不变） |
+
+### 静态确认（Static — 需真机复验）
+
+- pending 恢复后点「开始」、error+resumeKeys 恢复后「重试」不再撞 `.part`（CI 无法模拟真机 OPFS 时序）。
+- 关闭下载中心再重开，已派发未开始的任务仍在列表（persistHistory 落点）。
+- btnClean：有失败任务时清 tmp、保留 resume；无失败任务时两样都清。
+- 设置页改任意一项后引擎实时生效（normalizeSettings 通道）。
+
+### 待办（本轮明确不做）
+
+- DNR 静态规则 3 收窄到扩展自身（安全 F-004，需动 DNR 副作用测试基线，单独立项）。
+- `persistHistory` 失败降级写（丢弃 spec.info.pages 减体积）。
+- CI 覆盖元检查数字：`lint-ci-coverage` 现扫描 39 个被执行脚本。
 
 ---
 

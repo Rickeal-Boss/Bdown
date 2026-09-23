@@ -207,7 +207,9 @@ if (document.readyState === 'loading') {
 chrome.storage?.onChanged?.addListener((changes, area) => {
   if (area !== 'local') return;
   for (const key of ['showFloatingButton', 'showPlayerButton']) {
-    if (changes[key]) settings[key] = changes[key].newValue;
+    // ★ v1.4.31（数据一致性 F5）：与 settings.normalizeSettings 同语义 ——
+    //   只有字面 true 才算开。storage 里的脏值（"false" 非空串）不能当 truthy。
+    if (changes[key]) settings[key] = changes[key].newValue === true;
   }
   floatButton?.remove();
   playerButton?.remove();

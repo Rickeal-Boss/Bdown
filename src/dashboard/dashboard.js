@@ -313,6 +313,37 @@ async function prunePendingTask(task) {
 }
 
 /**
+ * 本会话已消费过的任务指纹表（防重复派发）。
+ *
+ * ★★ **必须声明在 `finishTracked = createTaskFinisher({...})` 之前**（v1.4.31 P0）。
+ *
+ *   v1.4.30 把它放在 647 行，而 `createTaskFinisher` 的绑定在 328 行就把
+ *   `registry: specRegistry` **当场求值**了 —— `const` 的暂时性死区（TDZ）让模块
+ *   在加载的第一毫秒就抛 `ReferenceError: Cannot access 'specRegistry' before
+ *   initialization`，**整个下载中心白屏**（任务列表、按钮、init 全部不执行，
+ *   派发过来的任务也永远没人消费）。而 35 个测试套件没有一个会 import
+ *   dashboard.js（它顶层依赖 document），CI 全绿。现在有
+ *   tools/test-page-modules.mjs 在 CI 里真加载全部 5 个页面模块，同类问题以后
+ *   活不过 CI。
+ *
+ * 为什么需要这张表：`storage.onChanged` 的每个事件都携带**该次写入瞬间**的
+ * `newValue` 快照。两次快速派发时（write1=[A]、write2=[A,B]）会触发两个事件，
+ * 各自按自己的 newValue 建任务 → **任务 A 被创建两次 → 同一个视频重复下载两份**。
+ *
+ * ★ v1.4.30（P1）：实现从裸 `Set<string>` 换成 engine 的 `SpecKeyRegistry`。
+ *   旧实现「注册时用原始 spec 算键、释放时用**被 ensureSpecComplete 原地改写过**的
+ *   spec 再算一次键」，两把键永远不等 → 指纹永不释放 → 从内容脚本悬浮按钮 /
+ *   播放器按钮 / 右键菜单（这些 spec **没有 cid**）下载过的视频，在**同一次会话内**
+ *   再也派发不出去 —— 静默吞掉，连 toast 都没有。
+ *   注册表把键记在 task 上，释放时删的就是当初占的那把键。
+ *
+ * ⚠️ 指纹函数 `specKey()` 现在住在 engine.js，与 `ensureSpecComplete` **同模块** ——
+ *   定义「任务身份」的代码必须和**改写**身份的代码放在一起，否则
+ *   「注册键 ≠ 释放键」会被下一次重构再次引入（v1.4.30 这条 P1 正是它）。
+ */
+const specRegistry = new SpecKeyRegistry();
+
+/**
  * 任务收尾：计数 / 持久化 / 清 pendingTasks / 释放指纹 / 完成通知 / 队列泵。
  *
  * ★ v1.4.30：编排本身搬到 `core/lifecycle.js`（依赖注入），这里只把真实的副作用接上去。
@@ -337,7 +368,15 @@ const finishTracked = createTaskFinisher({
   pump: () => pump(),
   // 收尾链单步失败要留下日志：这些失败是静默的（例如 storage 配额满导致
   // pendingTasks 清不掉），不记下来就再也追不到。
-  onError: (step, err) => log('任务收尾步骤失败', step, err?.message || err),
+  onError: (step, err) => {
+    log('任务收尾步骤失败', step, err?.message || err);
+    // ★ v1.4.31（数据一致性 F3）：persistHistory 是任务**唯一**的持久化落点，
+    //   它失败意味着这条任务在 storage 两侧都不存在（关掉页面即蒸发）。
+    //   只进 console 用户完全无感 —— 至少要告诉用户「这次没保存上」。
+    if (step === 'persistHistory') {
+      try { showToast('任务记录保存失败：' + (err?.message || err)); } catch { /* toast 失败不能再抛 */ }
+    }
+  },
 });
 
 /**
@@ -627,26 +666,6 @@ async function persistHistory() {
 }
 
 /**
- * 本会话已消费过的任务指纹表（防重复派发）。
- *
- * 为什么需要：`storage.onChanged` 的每个事件都携带**该次写入瞬间**的 `newValue` 快照。
- * 两次快速派发时（write1=[A]、write2=[A,B]）会触发两个事件，各自按自己的
- * newValue 建任务 → **任务 A 被创建两次 → 同一个视频重复下载两份**。
- *
- * ★ v1.4.30（P1）：实现从裸 `Set<string>` 换成 engine 的 `SpecKeyRegistry`。
- *   旧实现「注册时用原始 spec 算键、释放时用**被 ensureSpecComplete 原地改写过**的
- *   spec 再算一次键」，两把键永远不等 → 指纹永不释放 → 从内容脚本悬浮按钮 /
- *   播放器按钮 / 右键菜单（这些 spec **没有 cid**）下载过的视频，在**同一次会话内**
- *   再也派发不出去 —— 静默吞掉，连 toast 都没有。
- *   注册表把键记在 task 上，释放时删的就是当初占的那把键。
- *
- * ⚠️ 指纹函数 `specKey()` 现在住在 engine.js，与 `ensureSpecComplete` **同模块** ——
- *   定义「任务身份」的代码必须和**改写**身份的代码放在一起，否则
- *   「注册键 ≠ 释放键」会被下一次重构再次引入（v1.4.30 这条 P1 正是它）。
- */
-const specRegistry = new SpecKeyRegistry();
-
-/**
  * 原子地「读 → 删 → 去重 → 建任务」一批待处理任务。
  *
  * 关键点：**不直接采用 onChanged 事件里的 newValue**。那个值是某次写入瞬间的快照，
@@ -673,9 +692,10 @@ async function acceptPending(isIncremental = false) {
   if (!pendingTasks.length) return 0;
 
   let added = 0;
+  let skipped = 0;
   for (const spec of pendingTasks) {
     if (!spec || typeof spec !== 'object') continue;
-    if (specRegistry.has(spec)) continue;
+    if (specRegistry.has(spec)) { skipped += 1; continue; }
     const task = engine.addTask(spec, {
       title: spec.title || spec.info?.title || spec.bvid || '视频任务',
       filename: spec.filename || '',
@@ -689,6 +709,19 @@ async function acceptPending(isIncremental = false) {
   if (added) {
     updateCounts();
     if (isIncremental) showToast(`新增 ${added} 个任务`);
+    // ★ v1.4.31（数据一致性 F1）：新接受的任务必须**立刻落盘**。
+    //
+    //   SW 的 consumePendingTasks 是「读走即删」——条目从 storage 消失后，
+    //   任务只存在于本页内存里。而 `saveMode='ask'`（默认值）下任务必然停在
+    //   pending 等用户点「开始」：此时关掉标签页（或被 Chrome 内存回收），
+    //   pendingTasks 已空、taskHistory 里没有 → **用户点了下载却什么都没有**，
+    //   重开也找不回来。persistHistory 全库原本只有 3 个调用点（移除/清除/终态收尾），
+    //   全都发生在任务有状态**之后** —— 接受这一步必须自己补上。
+    await persistHistory();
+  } else if (skipped && isIncremental) {
+    // ★ v1.4.31：重复派发不再**静默**吞掉 —— 指纹防重的本意是"列表里已有"，
+    //   但对用户来说「点了下载什么都没发生」和扩展坏了无法区分。说一句在哪。
+    showToast(`相同任务已在列表中（${skipped} 个），未重复添加`);
   }
   return added;
 }
@@ -711,16 +744,23 @@ function releaseSpecKey(task) {
 
 async function loadPendingTasks() {
   const { [HISTORY_KEY]: history = [] } = await chrome.storage.local.get(HISTORY_KEY);
-  // ★ `paused` 必须一并恢复。
+  // ★ v1.4.31（数据一致性 F1）：`pending` 一并恢复。
   //
-  // 它是**可恢复终态而非终态**：只恢复 done/error/canceled 的话，用户暂停后关掉
-  // 下载中心再打开，那个任务会凭空消失 —— 而它留在 OPFS 里的 .part 与清单没人再管
-  // （task 对象没了，resumeKeys 也没了，discardResume 无从调用），永久占着空间。
-  const finished = history.filter((r) => ['done', 'error', 'canceled', 'paused'].includes(r.status));
+  //   acceptPending 建完任务就落盘（persistHistory），用户点了下载但还没点
+  //   「开始」就关掉标签页（或被 Chrome 内存回收）时，重开必须能看到这些
+  //   等待中的任务 —— 否则就是「点了下载却什么都没有」。
+  //   downloading / resolving / muxing / saving 不恢复：下载在页面里跑，
+  //   页面都没了任务自然死了，恢复一个假的「进行中」只会误导用户。
+  const restored = history.filter((r) =>
+    ['done', 'error', 'canceled', 'paused', 'pending'].includes(r.status));
 
-    // 消费并建任务（去重逻辑在 acceptPending 里统一处理）
-    const addedCount = await acceptPending(false);
-    for (const rec of finished) {
+  // ★ v1.4.31：**先恢复历史任务（占指纹），再消费 pendingTasks**。
+  //
+  //   顺序反了的话，「暂停中」的任务和「重启前刚派发、还没来得及消费」的
+  //   同视频新任务会各自建一张卡 —— 恢复发生在消费之后，指纹占位晚了一步，
+  //   新派发根本不知道内存里已经有同一个视频的 paused 任务等着「继续」。
+  //   先恢复，acceptPending 的 specRegistry.has() 就能把重复派发拦下来。
+  for (const rec of restored) {
     const task = new Task(rec.spec || {}, { title: rec.title, filename: rec.filename });
     task.id = rec.id;
     task.status = rec.status;
@@ -734,27 +774,39 @@ async function loadPendingTasks() {
     task.finishedAt = rec.finishedAt;
     // 恢复「已暂停」任务的续传归属：不还原就再也清不掉它的 .part（见上方说明）
     task.resumeKeys = Array.isArray(rec.resumeKeys) ? [...rec.resumeKeys] : [];
-    if (task.status === 'paused') {
-      task.paused = true;
-      // v1.4.29 数据一致性 F3：恢复的 paused 任务此前不注册防重指纹 ——
-      // 用户先重新派发同一视频、再点「继续」时，两个任务会并发写同一
-      // resumeKey 的 .part/.json（正是 fetchTo 注释里"同一 OPFS 文件两个
-      // writable 并存"的坏文件场景）。会话内 paused 不释放指纹（见
-      // finishTracked），恢复时也要把它占住。
-      //
-      // ★ v1.4.30：注册键必须与 fresh 派发的键**同形**。`rec.spec` 是
-      //   `ensureSpecComplete` 之后持久化的（**带 cid**），而 fresh 派发时
-      //   注册用的是**没有 cid** 的原始 spec —— 旧 specKey 含 cid，两者于是不同，
-      //   这条 v1.4.29 的修复在「恢复 ↔ 同视频重新派发」上实际失效。
-      //   现在 specKey 不含 cid，两侧同形。
+    // ★ v1.4.31（数据一致性 F2）：恢复**当初 claim 的那把键**，不要按 spec 重算。
+    //
+    //   番剧任务派发时 spec 只有 epId/seasonId（无 bvid/aid），运行中
+    //   ensureSpecComplete 会把它们原地补写进 spec —— 持久化的 rec.spec 是
+    //   **补全后**的形态。按它重算出来的键（含 bvid/aid）与 fresh 派发时
+    //   claim 的键（只有 epId）不相等 → 「恢复的 paused 任务」与「同视频
+    //   重新派发」互不设防 → 两个任务并发写同一个 resumeKey 的 .part
+    //   （正是"同一 OPFS 文件两个 writable 并存"的坏文件场景）。
+    //   toRecord 现在把 task.specKey 一起持久化，恢复时直接复用，两端同形。
+    if (rec.specKey) task.specKey = rec.specKey;
+    // 会话内不释放指纹的任务要占住：
+    //   - paused：等着被「继续」，放行同名派发会建出第二个同内容任务；
+    //   - pending（v1.4.31 F1 新恢复的形态）：等着被「开始」，同上；
+    //   - error 且带 resumeKeys（v1.4.31 F4）：.part/.json 刻意保留给「重试」，
+    //     它实际持有 OPFS 状态却不参与防重的话，重新派发 + 点「重试」
+    //     依旧是两路并发写同一个 .part。
+    // done / canceled 恰恰相反：必须**不**占，否则同会话内再也下不了第二次。
+    if (
+      task.status === 'paused'
+      || task.status === 'pending'
+      || (task.status === 'error' && task.resumeKeys.length > 0)
+    ) {
+      if (task.status === 'paused') task.paused = true;
       try { specRegistry.claim(task); } catch { /* ignore */ }
     }
-      engine.tasks.push(task);
-      renderTask(task);
-    }
-    updateCounts();
-    return addedCount;
+    engine.tasks.push(task);
+    renderTask(task);
   }
+  // 消费并建任务（去重逻辑在 acceptPending 里统一处理）
+  const addedCount = await acceptPending(false);
+  updateCounts();
+  return addedCount;
+}
 
 /* ------------------------------------------------------------------ *
  * 初始化
@@ -800,33 +852,41 @@ async function init() {
 
   $('btnOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
   $('btnClean').addEventListener('click', async () => {
-    // ★ v1.4.30（数据一致性 F3）：**先判定、再清理**，并且把 `error` 算作活跃。
+    // ★ v1.4.30（数据一致性 F3）：**先判定、再清理**。
     //
     //   原实现是「无条件 await engine.cleanupAll() → 之后才判 hasLive」，两处问题：
     //     ① `engine.cleanupAll()` 清的是 OPFS 的 `bdown-tmp` —— 那正是**在途大文件**
     //        的暂存目标（createOutput 按 shouldUseMemory 分流，只有大文件走 OPFS）。
     //        有下载在跑时点这个按钮，会把正在写的临时产物删掉。
     //     ② `hasLive` 的清单里**没有 `error`** —— 而 error 任务的 .part/.json 是
-    //        刻意保留给「重试」的（resume-store 的注释与 test-resume-store 断言都在
-    //        维护这个语义）。漏掉它之后，只要列表里有一个失败待重试的任务，
+    //        刻意保留给「重试」的。漏掉它之后，只要列表里有一个失败待重试的任务，
     //        这次点击就会把它唯一能续传的清单一起清掉，重试退化成从 0 重下。
-    let extra = '';
-    const hasLive = engine.tasks.some((t) =>
-      ['downloading', 'paused', 'resolving', 'muxing', 'saving', 'error'].includes(t.status));
-    if (hasLive) {
-      showToast('有进行中或待重试的任务，已跳过临时文件清理');
+    //
+    //   ★ v1.4.31（回归审查 P3）：两样东西的「活跃」判据**拆开** ——
+    //     `bdown-tmp` 只有在跑的任务会用（error 任务此刻并没有在写 tmp），
+    //     `bdown-resume` 才是 error 任务仍持有的。合在一起判的结果是：
+    //     列表里有一个失败任务 → 点按钮什么都不清、只弹一句提示，
+    //     用户想释放空间必须先手动移除失败任务 —— 按钮退化成了摆设。
+    const busy = engine.tasks.some((t) =>
+      ['downloading', 'paused', 'resolving', 'muxing', 'saving'].includes(t.status));
+    if (busy) {
+      showToast('有进行中的任务，已跳过临时文件清理');
       return;
     }
     await engine.cleanupAll();
     // v1.4.29 数据一致性 F2：「清理临时文件」此前只清 bdown-tmp，碰不到
-    // bdown-resume —— error/被遗忘的续传 .part 永久占空间。没有进行中/
-    // 暂停任务时一并清掉续传缓存（有则跳过，避免破坏在用的续传数据）。
-    try {
-      await new OpfsWorkspace('bdown-resume').clear();
-      extra = '，续传缓存已清';
-    } catch { /* 清不掉不影响主流程 */ }
+    // bdown-resume —— 被遗忘的续传 .part 永久占空间。error 任务的续传数据
+    // 刻意保留给「重试」，只有没有任何 error 任务时才一并清掉。
+    let extra = '';
+    const keepResume = engine.tasks.some((t) => t.status === 'error');
+    if (!keepResume) {
+      try {
+        await new OpfsWorkspace('bdown-resume').clear();
+        extra = '，续传缓存已清';
+      } catch { /* 清不掉不影响主流程 */ }
+    }
     await refreshStorageBadge();
-    showToast(`临时文件已清理${extra}`);
+    showToast(keepResume ? '临时文件已清理（失败任务的续传缓存已保留，移除任务后可清）' : `临时文件已清理${extra}`);
   });
   $('btnStartAll').addEventListener('click', () => startAll().catch((e) => showToast(e.message)));
   $('btnPauseAll').addEventListener('click', () => {

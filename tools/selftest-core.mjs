@@ -722,11 +722,15 @@ console.log('\n[10] v1.4.29 六路审查修复回归守卫（DOM 模块用源码
   check('run() 失败分支关闭已打开的 sink', () =>
     ENGINE_JS.includes('失败收尾') ? '' : '失败路径不关 sink（句柄泄漏 / 重试永久失败）');
 
-  // v1.4.30 数据一致性 F3：「清理临时文件」不得在活跃任务存在时执行，且 error 必须计入活跃
-  check('btnClean 先判定活跃再清理，且 error 计入活跃', () => {
-    if (!DASH_JS.includes("'saving', 'error'")) return 'error 未计入 hasLive（会误清待重试的续传清单）';
-    return /const hasLive[\s\S]{0,400}?\.some\(/.test(DASH_JS) && /hasLive\)\s*\{[\s\S]{0,200}?return;/.test(DASH_JS)
-      ? '' : 'hasLive 判定未前移到 cleanupAll 之前（会删掉在途大文件的临时产物）';
+  // v1.4.30 数据一致性 F3 + v1.4.31 回归审查 P3：「清理临时文件」不得在活跃任务
+  // 存在时执行；error 不再阻塞 tmp 清理（error 任务不写 tmp），但**必须**继续
+  // 阻塞 bdown-resume 清理（.part/.json 留给「重试」）。
+  check('btnClean 先判定在跑再清理 tmp，且 error 仍阻塞 resume 清理', () => {
+    if (!/const busy = engine\.tasks\.some\(\(t\) =>\s*\n?\s*\['downloading', 'paused', 'resolving', 'muxing', 'saving'\]/.test(DASH_JS))
+      return 'busy 判定未前移到 cleanupAll 之前（会删掉在途大文件的临时产物）';
+    if (!/keepResume = engine\.tasks\.some\(\(t\) => t\.status === 'error'\)/.test(DASH_JS))
+      return 'error 任务未阻塞 bdown-resume 清理（会误清待重试的续传清单）';
+    return '';
   });
 
   // v1.4.30 运行时 F1：抢占式占位，防 startAll 与 pump 同时启动同一任务
