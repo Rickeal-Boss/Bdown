@@ -1,8 +1,54 @@
 # 修复验证状态台账
 
-**最新**：v1.4.29（2026-09-23）。v1.4.21 台账见下方历史章节；v1.4.22–1.4.28 的
+**最新**：v1.4.30（2026-09-23）。v1.4.21 台账见下方历史章节；v1.4.22–1.4.29 的
 版本级验证状态以 CHANGELOG 对应条目为准。
 **原则**：区分「已实测验证」「静态确认」「待测」三类。**不接受"改了就是已修"**。
+
+---
+
+## v1.4.30 七路审查轮的验证状态
+
+### 已实测验证（Verified — 本机真实跑过）
+
+| 项 | 验证方式 | 结果 |
+|---|---|---|
+| **指纹「注册键 == 释放键」** | `tools/test-spec-key.mjs` [3] 端到端复现（无 cid 派发 → `ensureSpecComplete` 原地补 cid → 释放 → 集合必须空） | ✅ 28 项通过 |
+| **变异对照：把 cid 加回 `specKey`** | 临时改 `specKey` 后跑同一套件 | ✅ 转红（exit 1）→ 还原转绿，断言非空 |
+| **收尾编排六步不可少 / paused 不释放指纹** | `tools/test-lifecycle.mjs`（依赖注入 + 调用顺序断言） | ✅ 29 项通过 |
+| **变异对照：收尾去掉 `release`** | 临时删该行后跑同一套件 | ✅ 转红（exit 1）→ 还原转绿 |
+| **abort 收尾「先关 sink 再落清单」顺序** | `test-lifecycle` [5]（假 sink 记录调用顺序） | ✅ |
+| **变异对照：`abortFetchExit` 不关 sink** | 临时删除 `closeSinkQuietly` 调用 | ✅ 转红（exit 1）→ 还原转绿 |
+| **收尾链单步失败不拖累指纹释放** | `test-lifecycle` [4]（prune / persistHistory 注入抛错） | ✅ 指纹仍被释放，`onError` 上报 |
+| **番剧 `epId` / `seasonId` 补全 cid** | `test-spec-key` [4]（假 season 响应） | ✅ 含「拿不到剧集时不伪造 cid」反向用例 |
+| **课程 `cheeseId` 未被改回** | `test-spec-key` [5] + 「已有 cid 时短路不发请求」 | ✅ |
+| **包产物 44 文件 / 无隐藏文件 / 必备结构** | `node tools/package.mjs` + `test-release-gate.mjs` | ✅ 44 文件 / 640.1 KB |
+| **CI 覆盖元检查（含 `selftest-*`）** | `lint-ci-coverage` 现扫描 38 个被执行脚本 | ✅ 75 项通过 |
+| **三页 DOM id 一致性** | `lint-popup-ids`（popup / dashboard / options） | ✅ 12 项通过 |
+| 全量套件 | `for f in tools/test-*.mjs tools/lint-*.mjs tools/selftest-*.mjs` | ✅ **35 套件全绿**（含新增 2 个） |
+
+### 静态确认（Static — 需真机复验）
+
+| 项 | 位置 | 状态 |
+|---|---|---|
+| 番剧 `epId`/`seasonId` → 真机 /bangumi 页面按钮可下载 | `engine.ensureSpecComplete` 番剧分支 | **需真机**：`/pgc/view/web/season` 的真实响应结构与沙箱假数据可能有差异 |
+| content.js 两个注入按钮改为 `<button>` 后不受 B 站播放器样式干扰 | `src/content/content.js` + `content.css` | **需真机**：宿主页面对 `button` 的全局样式可能覆盖自绘样式 |
+| 键盘 Tab 走到悬浮按钮/播放器按钮并回车触发 | 同上 | **需真机** |
+| 对比度改动（`--bd-text-3` / `--bd-*-ink` / `--bd-focus` / `--bd-primary` / `--bd-track-off`）的视觉观感 | `src/ui/common.css` | **需真机**：比值是按 sRGB 公式手算的，观感需人眼确认 |
+| 弹窗清晰度列表键盘选中后焦点归还 | `src/popup/popup.js` `select()` | **需真机** |
+| `pendingTasks` 收口到 SW 后，连续快速派发（连点悬浮按钮 ×3）不丢任务 | `service-worker.js` + `dashboard.js` | **需真机**：跨上下文时序无法在 Node 里复现 |
+
+### 待测 / 已知局限（诚实清单）
+
+- **`/cheese/play/ss<id>`（课程 season 级链接）仍不能工作**：`content.js` 与
+  `util.extractVideoId` 都把它归一成 `cheeseId`，而 `api.cheeseSeason()` 走的是
+  `ep_id` 入参 —— 拿 season id 查不到剧集，最终以「任务缺少 cid」失败（**会报错，不静默**）。
+  要真正支持需要给 `cheeseSeason` 加 `season_id` 入参并区分两种链接，属独立立项。
+- 课程（pugv）接口与 `.flac` 无损路径**仍未真机验证**（付费/大会员内容）。
+- `test-lifecycle` [4] 明确了「收尾步骤失败只上报不抛出」的语义 —— 若将来希望
+  失败上抛给调用方，需同步改该断言。
+- `validate.mjs` 在本机有 `spawnSync node.exe EBUSY` 环境问题（沙箱限制，**CI 不受影响**），
+  本轮仍未处理；本地等价校验靠 `node --check` + 35 套件。
+- DNR 静态规则 3 对第三方页面的 Origin 改写为**已记录的接受风险**（F-002），维持现状。
 
 ---
 

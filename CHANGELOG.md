@@ -1,3 +1,104 @@
+## [1.4.30] - 2026-09-23
+
+> **七路子代理深度审查**（产品 / 安全 / 运行时 / 质量 / 设计 / 数据一致性 / 契约）的修复收口。
+> 本轮的两条 P1 有同一个特征：**功能"看起来能用"，但它依赖的那条路径上有一步静默失败**——
+> 一条是防重指纹注册键与释放键不相等（`Set.delete` 删不存在的键不报错），
+> 一条是番剧入口在引擎侧拿不到 `cid`（弹窗侧另有一套反查，所以只有页面按钮那条路断）。
+> 两条都**没有任何测试能发现**，因为失效是静默的。
+
+### 🟠 P1（2 项）
+
+1. **防重指纹「注册键 ≠ 释放键」→ 指纹永久泄漏**（运行时 / 数据一致性独立命中）。
+   `specKey()` 把 `cid` 算进了指纹，而 `cid` 是**派生值**：注册发生在
+   `acceptPending`（用 storage 里**原始** spec，内容脚本 / 右键菜单派发的 spec
+   根本没有 cid），释放发生在 `finishTracked`（用 `ensureSpecComplete` **原地补全后**
+   的 spec）。两个键永不相等，`Set.delete()` 静默返回 false → 指纹永不释放。
+   后果：从页面按钮下载过的视频，在**同一次会话内**再也派发不出去，
+   `acceptPending` 直接 `continue`，**连 toast 都没有**。
+   改为 `SpecKeyRegistry`：`claim()` 时把算出的键**记在 task 上**，`release()` 删同一把键；
+   `specKey` 迁到 `engine.js`（与改写 spec 的 `ensureSpecComplete` 同模块）。
+   另补 `act-retry` 重占指纹（此前重试期间可被重复派发，两任务并发写同一 `.part`）。
+2. **番剧入口整条断裂**：`ensureSpecComplete` 只认 `bvid`/`aid`/`cheeseId`，
+   `epId`/`seasonId` 原样返回（无 cid）→ `api.playurl` 的本地闸门必然抛
+   「任务缺少 cid」。弹窗自己有 `seasonInfo` 反查，所以只有**内容脚本悬浮按钮 /
+   播放器按钮 / 右键菜单**这条路径 100% 失败 —— 同一功能两条入口，一个通一个断。
+   补上番剧 season 反查分支（与 `popup.loadVideo` 同源）。
+   另：`content.js` 产出全库无人识别的 `cheeseSeasonId` 字段（`/cheese/play/ss<id>`），
+   统一归一成 `cheeseId`，与 `util.extractVideoId` 一致。
+
+### 🟠 P2
+
+- **`pendingTasks` 跨上下文读改写竞态**：SW 的 `append`（get→set[...,new]）与
+  dashboard 的 `remove` / `get→filter→set` 并发时互相吃掉 —— 用户刚点的那一票
+  **凭空消失**，或已消费的条目被写回来「复活」。storage 没有事务，唯一可靠解法是
+  让所有读改写落在同一个上下文。现在收口到 SW 的单一 Promise 串行链，
+  新增 `CONSUME_PENDING` / `PRUNE_PENDING` 两个端点（并删除全库零发送方的
+  `PARSE_TAB` / `PING` 死端点）。
+- **`fetchTo` 的第四条出口不经过 abort 收尾**：顺序下载回退路径上暂停/取消时，
+  `DownloadAborted` 直接穿出 `fetchTo`，sink 不关、已完成区间不落清单 ——
+  v1.4.29 把三条出口收拢到 `abortExit` 时漏掉的正是这条。另：空地址出口
+  此前直接 `throw`，会把调用方已打开的 writable 悬空。
+- **`mp4.js` 两处静默失真**：moof 之后文件被截断时原来 `break` 当"片段到此为止"，
+  产出**能播但缺末尾**的合法文件（本项目最危险的失败形态）；`trun` 的
+  `sample_count` 无上界，篡改成 `0xFFFFFFFF` 后实测空转 **~42 秒/轨**且不报错。
+  现在两道相互独立的上界（盒结构容量 + mdat 字节数），超限即抛。
+- **设置读取的类型安全**：数字字段此前只 `Number()` 不钳制 —— `concurrency: "NaN"`
+  会让分片 worker 循环 **0 次**却仍标记 `done`（静默产出 0 字节文件）；
+  布尔字段用 `!!v` 会把字符串 `"false"` 当成**开启**。改为按区间钳制
+  （越界钳到边界、非有限数回落默认）+ 布尔严格 `=== true`。
+- **收尾链单步失败会跳过后续步骤**：`persistHistory` / `prunePending` 任一抛错
+  （storage 配额满、并发写冲突）都会让**指纹释放**被整体跳过。改为逐步骤独立兜错，
+  并保留 `onError` 上报（失败是静默的，不记日志就再也追不到）。
+
+### 🟡 可访问性与对比度（设计批次，实测比值）
+
+- `--bd-text-3` 在 `--bd-surface-2` 上只有 4.28:1（AA 需 4.5）→ 亮色压到 `#666c77`
+  （白 / bg / surface-2 三底 5.28 / 4.93 / 4.68），暗色提到 `#8f959e`（5.34 / 5.89 / 4.69）。
+- **徽章文字全部不达标**（2.55–3.46:1）→ 新增 `--bd-*-ink` 墨色前景（亮/暗各一套，
+  避免暗色下 `var()` 落空），语义色本体仍用于填充与边框。
+- 焦点描边原用 `--bd-blue`（对白底 2.97:1，非文本需 ≥3）→ 独立 `--bd-focus` token
+  （亮 `#0b5e7d` / 暗 `#7fd4f0`）。
+- 主按钮渐变端白字仅 2.64:1 → 收窄到 `--bd-primary`/`--bd-primary-2`（4.82–7.02）；
+  悬停从 `brightness(1.06)`（会把亮端提亮回 4.35:1）改为轻微压暗。
+- **开关关态轨道近乎隐形**（内描边对白底 1.13:1）→ 内描边改走 `--bd-track-off`
+  （浅 3.87 / 深 4.16）。
+- **内容脚本两个注入按钮从 `<div onclick>` 改为 `<button>`** —— 此前键盘完全不可达
+  （B 站页面上没有任何键盘路径能发起下载），并补可见焦点环（双色环，浅/深宿主底
+  至少一环可见）与 `prefers-reduced-motion`。
+- **弹窗清晰度列表键盘选中后焦点丢失**：选择后 `render()` 会 `innerHTML = ''`
+  把持有焦点的节点销毁 → 焦点掉回 `<body>`。现在重渲染后把焦点还给新的选中项。
+- 弹窗封面 `<img src>` 此前写成 `safeMediaUrl(...).url`，而 `safeMediaUrl` 返回的是
+  **字符串** → `src` 恒为空串：白名单保护"生效"了，但封面也永远不显示。
+
+### 🧪 测试与工具（本轮的重点之一：把「不可断言」变成「可断言」）
+
+- 新增 `tools/test-spec-key.mjs`（28 项）与 `tools/test-lifecycle.mjs`（29 项）。
+  为此把 `finishTracked` 编排抽成 `src/core/lifecycle.js`（依赖注入），
+  把 `fetchTo` 的 abort 收尾抽成 `abortFetchExit`。原因：这两处原先分别住在依赖
+  `document` 的 `dashboard.js` 和内联闭包里，**CI 根本无法断言** ——
+  变异测试实测：把 `registry.release(task)` / `await prunePending(task)` /
+  `abortFetchExit` 里的 `closeSinkQuietly` 任一行删掉，**33 个套件依旧全绿**。
+- **变异验证**（断言非空对照）：把 `cid` 加回 `specKey` / 收尾去掉 `release` /
+  abort 不关 sink —— 三体全部转红，还原后转绿。
+- `lint-ci-coverage`：过滤器补上 `selftest-*.mjs`（此前**最重的两个套件**
+  —— `selftest-core` 146 项断言、`selftest-synthetic` —— 根本不在元检查范围内，
+  这正是 HANDOFF §3.3 记录过两次的漏计）；并把「被引用」改为「**真正被执行**」
+  （逐行扫描 `run:`，注释与 `echo` 里的文件名不再算数 —— 实测旧实现会被
+  `test-ghost.mjs` 只写在注释里骗过）。
+- `lint-popup-ids`：从只查 `popup` 扩到 **popup / dashboard / options 三页**
+  （dashboard 是全库最大 JS，此前零 id 守卫）；并修掉只认单引号的限制 ——
+  `$("x")` / `` $(`x`) `` / `querySelector('#x')` 此前**全部绕过**（PoC 实测
+  5 个不存在的 id 引用全部逃过检查、工具仍报绿）。
+- `lint-control-chars`：扫描范围补上 `_locales/`（文案里的控制字符会原样进入
+  i18n 替换结果，比源码更隐蔽）与 `docs/`、顶层 md。
+- `selftest-core` [10] 段新增 12 条源码守卫；其中 `content.js` 那条改为**先剥注释**
+  再判断（修复说明本身就会在注释里写下旧的坏字段名，直接 `includes()` 会被自己的
+  注释骗到 —— 实测过一次假阳性）。
+
+---
+
+
+
 ## [1.4.29] - 2026-09-23
 
 > **六路子代理深度审查**（产品 / 安全 / 运行时 / 质量 / 设计 / 数据一致性）的修复收口，
