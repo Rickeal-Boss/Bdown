@@ -26,7 +26,7 @@ import { parseViewPoints, chaptersToTxt, chaptersToVtt } from './chapters.js';
 import { buildNfo, nfoFilename } from './nfo.js';
 import { buildFilename, buildVars } from './settings.js';
 import { qualityShort } from './quality.js';
-import { sanitizeFilename, log, warn, sanitizeBiliUrl } from './util.js';
+import { sanitizeFilename, log, warn, sanitizeBiliUrl, safeMediaUrl } from './util.js';
 
 /**
  * @typedef {'pending'|'resolving'|'downloading'|'paused'|'muxing'|'saving'|'done'|'error'|'canceled'} TaskStatus
@@ -1241,7 +1241,13 @@ export class DownloadEngine {
 
     if (settings.saveCover && spec.cover) {
       try {
-        const res = await fetch(spec.cover, { credentials: 'omit' });
+        // ★ 封面与字幕同款：外部 URL 必须过媒体域名白名单（S-01）。
+        //   spec.cover 来自接口响应体（info.pic），是可控字段 —— 旧实现裸 fetch，
+        //   与 1155 行字幕的 sanitizeBiliUrl 处置不一致，可被指向内网/第三方地址
+        //   发起无凭证 GET（把真实 IP 与扩展 Origin 送出去）。
+        const coverUrl = safeMediaUrl(spec.cover);
+        if (!coverUrl) throw new Error('封面地址不在允许域内，已跳过');
+        const res = await fetch(coverUrl, { credentials: 'omit' });
         if (res.ok) {
           const blob = await res.blob();
           await put(`${task.filename}.cover.jpg`, blob, blob.type || 'image/jpeg');

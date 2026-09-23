@@ -16,7 +16,7 @@
  * 运行：node tools/test-stall-rotation.mjs
  */
 import { readBody, downloadRanged, downloadSequential, setFetchImpl, DownloadAborted } from '../src/core/downloader.js';
-import { FileHandleSink } from '../src/core/sink.js';
+import { FileHandleSink, MemorySink } from '../src/core/sink.js';
 
 let pass = 0;
 let fail = 0;
@@ -286,6 +286,53 @@ console.log('\n[10] ★ 顺序下载正常流式写入不误判');
   ok('总字节正确', res.bytes === 356, `bytes=${res.bytes}`);
   ok('按偏移顺序写入', writes.length === 3 && writes[0][0] === 0 && writes[1][0] === 100 && writes[2][0] === 300,
     JSON.stringify(writes));
+}
+
+console.log('\n[11] ★ 协作式取消：一个分片彻底失败后，其余 worker 必须立即收手');
+{
+  // 复现 v1.4.27 审查抓到的竞态：Promise.all 首错即抛，但其余 worker（straggler）
+  // 继续向同一 sink 写。上层「保留进度重试」会与这些 straggler 并发写 → 静默坏文件。
+  // 修复后：任一 worker 彻底失败时 ctrl.abort()，straggler 的 fetch 立即以 AbortError 结束。
+  const TOTAL = 8 * 1024 * 1024; // chunkSize clamp 到 MIN_CHUNK=512KB → 16 片
+  const isFailedChunk = (r) => { const m = /bytes=(\d+)-/.exec(r || ''); return m && Number(m[1]) === 0; };
+  const requests = []; // { range, aborted }
+  setFetchImpl(async (url, init = {}) => {
+    const range = init?.headers?.Range || '';
+    const entry = { range, aborted: false };
+    if (range) requests.push(entry);
+    if (isFailedChunk(range)) throw new Error('网络断开'); // 首片：永远失败
+    // 其余分片：等一小段时间再返回，给「worker0 失败 → abort」留出时间窗口；
+    // 窗口内收到 abort 就标记并以 AbortError 结束（模拟真实 fetch 行为）
+    const sig = init.signal;
+    await new Promise((resolve) => {
+      if (sig?.aborted) return resolve();
+      const t = setTimeout(resolve, 1500); // 覆盖 worker0 的重试窗口（3 次尝试 × 500ms 间隔 ≈ 1s）
+      sig?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+    });
+    if (sig?.aborted) {
+      entry.aborted = true;
+      const e = new Error('The user aborted a request.');
+      e.name = 'AbortError';
+      throw e;
+    }
+    return cdnResponse(TOTAL, init);
+  });
+  const sink = { writeAt: async () => {} };
+  let threw = null;
+  try {
+    await downloadRanged({
+      urls: ['https://a.cdn.test/v.m4s'], size: TOTAL, sink,
+      concurrency: 3, retries: 0, probe: false, signal: null,
+    });
+  } catch (e) { threw = e; }
+  ok('downloadRanged 抛出分片失败错误', threw !== null, String(threw));
+  const stragglers = requests.filter((r) => !isFailedChunk(r.range));
+  ok('存在 straggler 请求（竞态现场成立）', stragglers.length > 0,
+    '请求记录 ' + JSON.stringify(requests) + ' — 没有并发分片就测不到这个竞态');
+  ok('straggler 全部被协作取消（fetch 收到 abort）',
+    stragglers.every((r) => r.aborted),
+    '未取消的 straggler：' + JSON.stringify(stragglers.filter((r) => !r.aborted)) + ' — 旧实现会继续把分片跑完，与新重试并发写 sink');
+  setFetchImpl(null);
 }
 
 setFetchImpl(null);

@@ -63,7 +63,7 @@ export function subtitleToAss(subtitle, opts = {}) {
   const H = opts.height || 1080;
   const header = `[Script Info]
 ; 由 Bdown - B站视频下载助手 生成
-Title: ${opts.title || 'Bilibili Subtitle'}
+Title: ${(opts.title || 'Bilibili Subtitle').replace(/[\r\n]+/g, ' ')}
 ScriptType: v4.00+
 WrapStyle: 0
 ScaledBorderAndShadow: yes

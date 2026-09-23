@@ -151,6 +151,12 @@ jobs:
       - name: 文档一致性检查（README / 设置页文案 vs 代码实际行为）
         run: node tools/lint-docs-consistency.mjs
 
+      # 弹窗 DOM id 一致性：popup.js $('xxx') 引用的每个 id 必须存在于 popup.html。
+      # 历史 P0（v1.4.27 审查）：合集区块的 4 个 id 只在 JS 里、HTML 从没写过，
+      # 合集视频打开弹窗直接 TypeError —— 纯逻辑测试全绿也发现不了这类断链。
+      - name: 弹窗 id 一致性检查（JS 引用 vs HTML 定义，防「引用不存在的 DOM」）
+        run: node tools/lint-popup-ids.mjs
+
       # 元检查：本工作流是**逐条列文件**的，新增测试若忘了加进来，
       # CI 会"绿着"却 0 覆盖。这条断言所有 tools/test-*.mjs 与
       # tools/lint-*.mjs 都已被本工作流引用。

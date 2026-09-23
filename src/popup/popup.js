@@ -5,7 +5,7 @@
 import { BiliApi, pickVideoTrack, pickAudioTrack, pickExactTrack } from '../core/api.js';
 import { QUALITIES, qualityShort } from '../core/quality.js';
 import { loadSettings, saveSettings, MODE_HINTS, AUDIO_UNAVAILABLE_HINT, estimateSizeBytes } from '../core/settings.js';
-import { extractVideoId, formatBytes, formatDuration, parseRangeExpr, sanitizeFilename, applyTemplate, formatNumber, escapeHtml, warn } from '../core/util.js';
+import { extractVideoId, formatBytes, formatDuration, parseRangeExpr, sanitizeFilename, applyTemplate, formatNumber, escapeHtml, warn, dateVars } from '../core/util.js';
 import { parseUgcSeason, isBatchableSeason, seasonToSpecs } from '../core/season.js';
 
 const $ = (id) => document.getElementById(id);
@@ -388,6 +388,8 @@ function collectSpecs() {
         cid: s.cid || '',
         user: info?.owner?.name || '',
         userID: info?.owner?.mid || '',
+        duration: s.duration || 0,
+        ...dateVars(info?.pubdate || Math.floor(Date.now() / 1000)),
         qualityShort: qOpt?.short || '',
       };
       let filename = applyTemplate(settings.batchNameTemplate, vars);
@@ -439,6 +441,11 @@ function collectSpecs() {
       cid: page?.cid || '',
       user: info.owner?.name || '',
       userID: info.owner?.mid || '',
+      duration: page?.duration || info.duration || '',
+      // v1.4.27 审查（产品官 P1-2）：弹窗此前自建 vars 漏了日期组，
+      // 模板 {year}/{month}/{day} 在弹窗路径下恒为空串。dateVars 与
+      // 设置页 buildVars 同源（util.dateVars），单一真源。
+      ...dateVars(info.pubdate || Math.floor(Date.now() / 1000)),
       qualityShort: qualityOpt?.short || '',
     };
     const template = total > 1 ? settings.batchNameTemplate : settings.singleNameTemplate;

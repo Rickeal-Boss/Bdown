@@ -91,6 +91,20 @@
         </div>
       </div>
 
+      <!-- 合集（ugc_season）：popup.js render() 会按有无合集切换 hidden。
+           这个区块曾经缺失（v1.4.27 审查 P0）—— JS 引用了这 4 个 id，
+           HTML 却从来没写过，打开合集视频弹窗直接 TypeError。 -->
+      <div id="seasonSection" class="section" hidden>
+        <div class="section-head">
+          <span class="bd-label">合集</span>
+          <span id="seasonHint" class="bd-hint"></span>
+        </div>
+        <label class="bd-switch">
+          <input type="checkbox" id="optWholeSeason" />
+          <span id="seasonLabel"></span>
+        </label>
+      </div>
+
       <div class="section">
         <div class="section-head"><span class="bd-label">附加内容</span></div>
         <div class="extras">

@@ -147,7 +147,7 @@ export function danmakuToAss(list, opts = {}) {
   const header = `[Script Info]
 ; 由 Bdown - B站视频下载助手 生成
 ; 弹幕数量: ${list.length}
-Title: ${opts.title || 'Bilibili Danmaku'}
+Title: ${(opts.title || 'Bilibili Danmaku').replace(/[\r\n]+/g, ' ')}
 ScriptType: v4.00+
 WrapStyle: 2
 ScaledBorderAndShadow: yes

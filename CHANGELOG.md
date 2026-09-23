@@ -1,3 +1,53 @@
+## [1.4.28] - 2026-09-23
+
+> **七路全方位审查**（产品 / 安全 / 运行时 / 数据一致性 / 质量 / 设计 / 代码）的修复收口。
+> 全部发现经主理人逐一读码核实，**零误报**。本轮抓到的问题集中在此前所有轮次
+> 都没覆盖的两类：**并发竞态**（通向静默坏文件）与 **JS/HTML 断链**（纯逻辑测试看不见 DOM）。
+
+### 🔴 P0 合集视频打开弹窗即崩
+
+`popup.js:352-357` 引用的 `seasonSection` / `optWholeSeason` / `seasonLabel` / `seasonHint`
+四个 DOM **在 popup.html 里从来没写过**（后端 season.js 与合集展开逻辑全部就绪）。
+打开任何属于合集的视频 → `seasonSection.hidden = false` 对 null 赋值 TypeError → 弹窗崩成报错页。
+补上缺失的 HTML 区块，功能即完整可用。
+新增 `tools/lint-popup-ids.mjs`：popup.js 引用的每个 id 必须存在于 popup.html，
+静态比对、不需要 DOM 环境，同类断链以后都会在 CI 被拦住。
+
+### 🟠 P1 并发竞态三连（运行时排障手，全部通向静默坏文件）
+
+1. **straggler 竞态**：`downloadRanged` 用 `Promise.all`，一个 worker 彻底失败后
+   **其余 worker 继续跑**——上层「保留进度重试」与这些 straggler 并发写同一 sink → 字节错乱。
+   改为协作式取消：内部 `AbortController`，任一 worker 放弃时 `ctrl.abort()`，
+   全部 `allSettled` 后才抛第一个真实错误。
+2. **移除不 abort**：移除运行中任务只从列表删掉、不取消下载——`finally` 会把带
+   `resumeKeys` 的任务写回 taskHistory（删了又复活），且旧 worker 与重新发起的
+   同视频任务并发写同一 `.part`。移除任何状态前先 `task.cancel()`（幂等）。
+3. 新增回归测试 [11]：断言 straggler 的 fetch 收到 abort。**断言非空已对照验证**
+   （临时禁用 `ctrl.abort()` → 11 个 straggler 全部未取消、测试变红）。
+
+### 🟠 P1 其余
+
+- **封面 URL 走白名单**（安全官 S-01）：`fetch(spec.cover)` 是全库唯一没过
+  `sanitizeBiliUrl` 的外部请求（字幕同路径早走了），已对齐。
+- **弹窗模板变量补齐**（产品官 P1-2）：弹窗自建 vars 漏了日期组，
+  `{year}/{month}/{day}` 在弹窗路径恒为空串；`dateVars` 与设置页 `buildVars` 同源。
+
+### 🟡 P2
+
+- ASS 头部 `Title:` 转义换行（UP 主可控标题含换行会破坏 ASS 结构，安全官 PoC 复现）
+- `MODE_HINTS.separate` 第 4 次文案漂移对齐（实际音频产物是 `.audio.m4a` / `.audio.flac`）
+- 删除 `SAVE_SETTINGS` 死代码 handler（全库零调用且无键白名单）
+
+### 审查统计
+
+- 七路发现：🔴 1 / 🟠 5 / 🟡 9+，交叉核实**零误报**
+- 主理人变异测试：4 个关键函数注入变异，`selftest-core` 抓到全部（断言非空确认）
+- **发现本地验证口径漏洞**：`tools/selftest-*.mjs` 不匹配 `test-*.mjs` 通配，
+  长期未被计入「全量套件」统计（CI 有跑）——统计口径修正为 32 套件
+- 产物与源码 CRC 级逐条比对零不一致；10 个死代码已登记 backlog
+
+---
+
 ## [1.4.27] - 2026-09-22
 
 > 交付前的**多智能体审查流水线**：4 路只读审查并行（产品 / 安全 / 质量 / 运行时）

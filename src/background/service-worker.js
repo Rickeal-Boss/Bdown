@@ -149,11 +149,6 @@ const handlers = {
     return { ok: true, settings: await loadSettings() };
   },
 
-  async SAVE_SETTINGS(msg) {
-    await chrome.storage.local.set(msg.payload || {});
-    return { ok: true };
-  },
-
   async PING() {
     return { ok: true, pong: Date.now() };
   },

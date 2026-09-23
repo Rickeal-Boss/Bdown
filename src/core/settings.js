@@ -213,7 +213,7 @@ export function savePickerHint(mode, name) {
  */
 export const MODE_HINTS = {
   merge: '下载 DASH 音视频后无损合并为单个 MP4（推荐，支持全部清晰度）',
-  separate: '分别保存 video.mp4 与 audio.m4a，自行用播放器/ffmpeg 处理',
+  separate: '分别保存视频与音频两个文件（音频按真实类型存 .m4a / 无损 .flac），自行用播放器/ffmpeg 处理',
   audio: '只下载音轨，不转码；普通音轨存 .m4a，Hi-Res 无损存 .flac',
   durl: '直接下载单文件 MP4，无需合并；但清晰度上限较低（通常 720P/1080P）',
 };

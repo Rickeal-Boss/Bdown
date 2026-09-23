@@ -422,8 +422,32 @@ export async function downloadRanged({
     });
   };
 
+  // ★ 协作式取消（修复「一个分片失败后其余 worker 照跑」的竞态）。
+  //
+  //   旧实现 Promise.all(workers) 在第一个 rejection 时就向上抛错，
+  //   但 **其余 worker 的 Promise 会继续跑**：它们还在向同一个 sink 写字节。
+  //   上层 fetchTo 捕获后进入「保留进度重试」，新一轮 downloadRanged 与这些
+  //   straggler **并发写同一 sink** → 字节错乱 → 静默产出损坏的文件。
+  //
+  //   现在：任一 worker 彻底失败（放弃重试）时先 ctrl.abort()，
+  //   其余 worker 的 fetch 立即以 AbortError 结束，全部 settle 后才向上抛错。
+  //   外部 signal（用户取消）也并进来，保持原有取消语义。
+  const ctrl = new AbortController();
+  let workerSignal = ctrl.signal;
+  if (signal && !signal.aborted) {
+    try {
+      workerSignal = AbortSignal.any([signal, ctrl.signal]);
+    } catch {
+      // AbortSignal.any 不可用（理论上 Chrome 116+ 都支持，doFetch 已依赖它）：
+      // 退化为「外部取消转发」——外部 abort 时同步转 abort 内部 ctrl。
+      signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+    }
+  } else if (signal?.aborted) {
+    ctrl.abort();
+  }
+
   const throwIfAborted = () => {
-    if (signal?.aborted) throw new DownloadAborted();
+    if (workerSignal.aborted) throw new DownloadAborted();
   };
 
   /**
@@ -513,7 +537,7 @@ export async function downloadRanged({
           //   - DownloadAborted（用户取消）：已取消还要跑满次数并 sleep 是纯延迟
           //   - rangeIgnored（服务器不支持 Range）：重试只会把整个文件再下一遍，
           //     8 分片 × (retries+1) 可达 24 次全量下载
-          const out = await retry(() => fetchRange(url, range, signal), {
+          const out = await retry(() => fetchRange(url, range, workerSignal), {
             times: attemptsPerUrl,
             baseDelay: 500,
             shouldRetry: (err) => !(err instanceof DownloadAborted) && !err?.rangeIgnored,
@@ -532,7 +556,7 @@ export async function downloadRanged({
           break;
         } catch (err) {
           if (err instanceof DownloadAborted) throw err;
-          if (signal?.aborted) throw new DownloadAborted();
+          if (workerSignal.aborted) throw new DownloadAborted();
           // 服务器不支持 Range：分片下载这条路走不通，立即放弃。
           // 继续重试/换备用地址只会把整个文件重复下载一遍又一遍。
           if (err?.rangeIgnored) throw err;
@@ -542,6 +566,9 @@ export async function downloadRanged({
         }
       }
       if (lastError) {
+        // ★ 本 worker 已放弃：通知其余 straggler 立即收手，防止新旧两批
+        //   downloadRanged 并发写同一 sink（静默坏文件的根源，见上方 ctrl 注释）。
+        ctrl.abort();
         const e = new Error(`分片 ${range.start}-${range.end} 下载失败：${lastError.message}`);
         // **必须保留 status**：上层靠它判断是不是「播放地址过期」（403/404）。
         // 之前这里重新 new Error 时把 status 丢了，导致过期重试永远不会触发。
@@ -552,7 +579,14 @@ export async function downloadRanged({
   };
 
   const workers = Array.from({ length: Math.min(concurrency, ranges.length) }, (_unused, i) => worker(i));
-  await Promise.all(workers);
+  // ★ allSettled：等**所有** worker 真正结束（包括被协作取消的 straggler），
+  //   再向上抛第一个真实错误。旧的 Promise.all 首错即抛、straggler 还在写 sink，
+  //   上层重试时就会新旧并发写同一 sink。
+  const results = await Promise.allSettled(workers);
+  const failed = results.filter((r) => r.status === 'rejected').map((r) => r.reason);
+  const real = failed.find((e) => !(e instanceof DownloadAborted));
+  if (real) throw real;
+  if (failed.length) throw new DownloadAborted();
   report(true);
   return { bytes: downloaded, elapsed: (performance.now() - startedAt) / 1000, size };
 }

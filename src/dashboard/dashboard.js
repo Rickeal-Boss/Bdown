@@ -90,8 +90,17 @@ function ensureNode(task) {
     showToast(task.outputs.map((o) => o.path).join('、') || '无输出文件');
   });
   el.querySelector('.act-remove').addEventListener('click', () => {
+    // ★ 移除任何状态的任务前先 cancel（幂等）。
+    //
+    //   旧实现只对 paused 清清单，downloading 时直接从 tasks 里删掉 ——
+    //   但下载 worker 还在跑（signal 没 abort），runTracked 的 finally 会把
+    //   带 resumeKeys 的任务写回 taskHistory（用户以为删了，重启后复活）；
+    //   用户若随即重新下载同一视频，旧 straggler 还会与新任务并发写同一 .part。
+    //   审查轮 R3（运行时排障手）。
+    task.cancel();
     // 移除一个「已暂停」的任务 = 用户放弃这次续传 → 必须把清单和 .part 一起删掉，
     // 否则它会永久占着 OPFS，且下次同一视频可能续到这份残缺数据上。
+    // （downloading 中途取消的清单由 run() 的 catch 分支清；paused 到这里的清单只能在这里清。）
     if (task.status === 'paused') {
       task.paused = false;
       engine.discardResume(task).catch(() => {});
