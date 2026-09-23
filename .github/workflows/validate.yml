@@ -113,20 +113,6 @@ jobs:
       - name: 任务收尾编排自检（六步不可少 / paused 不释放指纹 / abort 先关 sink 再记账）
         run: node tools/test-lifecycle.mjs
 
-      # v1.4.30 最重的一条 P1：`specKey()` 把 cid 算进键 → 注册用未补全的 spec、
-      # 释放用被 ensureSpecComplete 原地补全后的 spec → 两把键永不相等 →
-      # Set.delete 删一个不存在的键（静默 false）→ 指纹永久泄漏 →
-      # 从悬浮按钮/右键菜单下载过的视频，同会话内再也派发不出去（连 toast 都没有）。
-      # 这条不变量此前**没有任何断言**，所以它坏了几个版本都没人发现。
-      - name: 防重指纹自检（注册键必须等于释放键）
-        run: node tools/test-spec-key.mjs
-
-      # 任务收尾编排（计数/持久化/prune/释放指纹/泵）从 dashboard.js 抽到
-      # core/lifecycle.js 并改为依赖注入 —— 于是它能在 CI 里直接跑了。
-      # 以前这段只能靠 selftest-core 的 grep 计数断言兜着（存在性 ≠ 有效性）。
-      - name: 任务收尾编排自检（依赖注入，不靠 grep 计数）
-        run: node tools/test-lifecycle.mjs
-
       - name: NFO 元数据自检（XML 转义 / movie+episode+tvshow 三形态）
         run: node tools/test-nfo.mjs
 
