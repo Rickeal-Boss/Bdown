@@ -115,17 +115,10 @@ export function signParams(params, mixinKey) {
   return { ...cleaned, w_rid: md5(query + mixinKey) };
 }
 
-/**
- * 便捷方法：取 key + 签名 + 拼 query string。
- * @returns {Promise<string>} `a=1&b=2&w_rid=...`
+/*
+ * v1.4.29 死代码清理：signedQuery 便捷包装全库零引用（api.js 走
+ * getMixinKey + signParams 自行拼接），删除。
  */
-export async function signedQuery(params, fetchNav) {
-  const mixinKey = await getMixinKey(fetchNav);
-  const signed = signParams(params, mixinKey);
-  return Object.entries(signed)
-    .map(([k, v]) => `${formUrlEncode(k)}=${formUrlEncode(v)}`)
-    .join('&');
-}
 
 /**
  * 生成 `dm_img_*` 指纹参数。

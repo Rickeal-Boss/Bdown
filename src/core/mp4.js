@@ -174,8 +174,8 @@ export function readMvhdTimescale(bytes, mvhd) {
   return u32(bytes, offset);
 }
 
-/** trak 的 track_ID。 */
-export function readTkhdTrackId(bytes, tkhd) {
+/** trak 的 track_ID。v1.4.29：取消 export —— 仅本文件 779 行附近内部使用（零外部引用），函数保留。 */
+function readTkhdTrackId(bytes, tkhd) {
   const version = bytes[tkhd.start + tkhd.headerSize];
   const offset = tkhd.start + tkhd.headerSize + 4 + (version === 1 ? 16 : 8);
   return u32(bytes, offset);
@@ -453,12 +453,8 @@ function readTrexDefaults(moovBytes, trex) {
   };
 }
 
-/** mehd 中的分片总时长（单位 = mvhd timescale）。 */
-export function readMehdDuration(moovBytes, mehd) {
-  const version = moovBytes[mehd.start + mehd.headerSize];
-  const p = mehd.start + mehd.headerSize + 4;
-  return version === 1 ? u32(moovBytes, p) * 4294967296 + u32(moovBytes, p + 4) : u32(moovBytes, p);
-}
+// v1.4.29 死代码清理：readMehdDuration 全库零引用（moov 重建走 mvhd 时长），
+// 删除。需要时从 git 历史找回。
 
 function readTfhdDefaultDuration(bytes, tfhd) {
   const flags = boxFlags(bytes, tfhd);

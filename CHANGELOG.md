@@ -1,3 +1,85 @@
+## [1.4.29] - 2026-09-23
+
+> **六路子代理深度审查**（产品 / 安全 / 运行时 / 质量 / 设计 / 数据一致性）的修复收口，
+> 主理人交叉核实后统一修复。P1/P2 发现**全部核实属实，零误报**。
+> 本轮最大价值：抓住 **上一轮声称"已补"的焦点样式实际从未落地**（`git log -S` 证实
+> 任何提交都没有过 `focus-visible`）—— 修复声明与代码事实不符，已连同本轮全部
+> DOM 类修复一起用 `selftest-core` 源码断言锁死，防止再次「说修了其实没有」。
+
+### 🟠 P1（4 项）
+
+1. **合集 spec 丢失 `downloadMode`**（产品官 F-1）：弹窗里选的「音视频分离 / 仅音频」
+   对「下载整个合集」**静默失效**（回落全局设置），与 v1.4.28 修的 P1-3 同类复发、
+   且发生在合集新功能上。合集分支现在与普通分支同源 `currentMode()`。
+2. **「全部开始」/ downloads 泵收尾漏项**（产品官 F-2）：startAll 与 pump 的 `.finally`
+   复制了 runTracked 的收尾却漏掉 `prunePendingTask` 与 `releaseSpecKey` ——
+   任务完成后指纹不释放，同会话内再下载同一视频被**静默吞掉**（连 toast 都没有）。
+   收尾统一收拢为 `finishTracked`（runTracked 注释里"复制三份必漏一份"的教训应验）。
+3. **课程（cheese）弹窗入口整条断裂**（产品官 F-3）：URL 解析与 playurl 参数都就绪，
+   唯独 `loadVideo` 没有 cheese 分流 —— 课程链接进弹窗必报「请求缺少视频标识」。
+   补上 `api.cheeseSeason` 反查（与引擎 `ensureSpecComplete` 同源）。
+4. **焦点样式补齐**（设计师 C1/C2）：common.css 全局 `:focus-visible`（键盘才触发）、
+   分段控件焦点画在可视 span 上、开关关态可辨识、清晰度列表补 role/tabindex/
+   Enter/Space —— 键盘用户此前**无法选择清晰度**（核心路径不可达）。
+
+### 🟠 P2（6 项）
+
+- **fetchTo 重试子路径的 abort 绕过收尾**（运行时 F1）：暂停/取消落在「刷新地址重试」
+  或「保留进度重试」期间时，`DownloadAborted` 绕过 sink 关闭与清单落盘 ——
+  「同一 .part 两个 writable 并存」的坏文件场景复燃。统一收拢到 `abortExit` 出口。
+- **移除任务后幽灵卡片复活**（运行时 F2 + 数据一致性 F1 双路独立命中）：数据删干净了，
+  但引擎 emit → `ensureNode` 把 DOM 行画回来。`removedIds` 守卫短路渲染。
+- **error 任务移除后 .part 永久孤儿**（数据一致性 F2）：error 的清单是留给「重试」的，
+  用户移除即放弃 → 现在随移除/批量清除一并删；「清理临时文件」在无进行中任务时
+  一并清理 `bdown-resume` 续传缓存（此前只清 `bdown-tmp`）。
+- **恢复的 paused 任务不注册防重指纹**（数据一致性 F3）：跨会话可对同一视频既重新
+  派发又点「继续」→ 两个任务并发写同一 `.part`。恢复时注册 `consumedSpecKeys`。
+- **保存对话框建议名张冠李戴**（产品官 F-5）：`pickDestination` 取「列表第一个
+  pending 任务」的建议名/类型；多任务待下载时点非首个任务，产物名会写错。
+  现在显式传任务；选择器返回后复查并发槽位（运行时 F5）。
+- **ask + 单文件的附加内容位置披露**（产品官 F-4）：主文件直写所选句柄，附加产物
+  受 File System Access API 限制只能落浏览器下载目录 —— toast 明示，不再静默。
+
+### 🟡 P3 及以下（摘要）
+
+- **安全**：字幕 URL 非白名单**直接跳过**（此前降级 fetch 仍向任意域发请求，与封面
+  处置对齐）；弹窗封面 `<img src>` 过 `safeMediaUrl`；章节标题折叠连续空行
+  （不再产出结构损坏的 VTT/TXT）。DNR 静态规则 3 的第三方 Origin 改写为已记录的
+  接受风险（F-002），维持现状。
+- **运行时**：allSettled 首错优先取 403/404/410（过期换址不再被普通网络错误掩盖）；
+  失败路径补 `report(true)`（续传清单不再丢最后 ≤300ms 的区间）；重试退避感知 abort
+  （暂停响应最多快 ~7.5s）；rangeIgnored 立即 abort 其余 worker（避免 N×全量内存峰值）；
+  删除 `engine.running` 死代码。
+- **数据一致性**：resumeKey 并入 `cheeseId`（课程此前静默无续传）与实际选中轨
+  `trackId`（防换音质后 size 相等跨轨续写）；`loadSettings` 枚举字段白名单校验
+  （非法值回落默认）；死代码再删 3 处（engine `export { qualityShort }` 再导出、
+  mp4 `readTkhdTrackId` 导出、chapters 常量）。
+- **产品**：勾选合集后锁定分P区并说明原因（F-6）；附加内容开关加「会记住为默认偏好」
+  提示（F-7）；设置页改保存方式后下载中心下拉即时同步（F-8）；合集 spec 透传
+  fromSeason/seasonId/seasonIndex（F-9）；登录徽章失败态与 sendMessage 失败反馈（F-12）。
+- **设计**：`--bd-text-3` 对比度提亮到 WCAG AA（两主题）；输入框焦点光晕 0.14→0.35；
+  暂停态 warn 色回归 token（删除游离的 #e2a33c）；长标题/分P名/任务文件名补
+  `title` 兜底；seasonHint 单行省略；暗色选中态背景加深；`prefers-reduced-motion`
+  支持；options 页滚动条统一；toast 加 `aria-live`。
+- **文档**：README 附加内容表补章节/NFO、注明 UI 语言；`docs/VERIFICATION-STATUS.md`
+  与 `MANUAL-VERIFICATION.md` 从停滞的 v1.4.21 更新至 v1.4.29。
+- **测试**：新增 `tools/test-settings-enum.mjs`（已登记 validate.yml）；resumeKey 新字段、
+  章节换行清洗、ASS Title 换行回归、`selftest-core` [10] 源码级回归守卫段
+  （合集 downloadMode / finishTracked / removedIds / abortExit / 字幕跳过 / 焦点样式）。
+- **死代码清理（backlog 清偿）**：上一轮登记的 10 个零引用导出全部删除
+  （quality.js ×7、wbi.js `signedQuery`、mp4.js `readMehdDuration`、danmaku.js
+  `danmakuFilename`），连同本轮新发现 3 处；danmaku.js 顺带清掉失效的
+  `sanitizeFilename` 导入。
+
+### ⚪ 已知局限
+
+- 课程（cheese）接口路径与 `.flac` 无损音轨仍未真机验证（付费/大会员内容）。
+- 孤儿 .part 主动清扫器仍为「无进行中任务时随清理按钮执行」，未做启动时后台扫描。
+- `readBody` 峰值内存（约 256MB 瞬时堆）仍为整段缓冲，未改流式落盘（P3，改动面大）。
+- muxing 阶段取消仍会先落完整产物再标记 canceled（P5，`mergeDashStream` 未接 signal）。
+
+---
+
 ## [1.4.28] - 2026-09-23
 
 > **七路全方位审查**（产品 / 安全 / 运行时 / 数据一致性 / 质量 / 设计 / 代码）的修复收口。

@@ -46,6 +46,19 @@ console.log('\n[1] resumeKey — 由内容身份派生');
     !/[^A-Za-z0-9_]/.test(resumeKey({ bvid: 'BV1xx411c7mD', cid: 1, codec: 'H.264/AVC!' }) || 'x'));
 }
 
+console.log('\n[1b] resumeKey — cheeseId 与 trackId（v1.4.29 数据一致性 F4/F5）');
+{
+  ok('cheeseId 能派生（课程任务此前 key 为空 → 静默无续传）',
+    resumeKey({ cheeseId: 12345, cid: 99 }).startsWith('ch12345_'));
+  ok('cheeseId 与 aid 派生的 key 不碰撞',
+    resumeKey({ cheeseId: 1, cid: 99 }) !== resumeKey({ aid: 1, cid: 99 }));
+  const base = { bvid: 'BV1xx411c7mD', cid: 62131, quality: 80, codec: 'AVC', track: 'a' };
+  ok('音轨 id 并入 key：不同音轨不同 key（防 size 恰好相等时跨轨续写）',
+    resumeKey({ ...base, trackId: 30280 }) !== resumeKey({ ...base, trackId: 30251 }));
+  ok('trackId 缺省或 0 时不进 key（向后兼容旧清单）',
+    resumeKey(base) === resumeKey({ ...base, trackId: 0 }) && resumeKey(base) === resumeKey({ ...base }));
+}
+
 console.log('\n[2] canResume — 清单校验');
 {
   const size = 1000;

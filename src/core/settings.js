@@ -70,6 +70,24 @@ const KEYS = Object.keys(DEFAULT_SETTINGS);
 /** DEFAULT_SETTINGS 里类型是 number 的字段名（用于读取时做归一化）。 */
 const NUMERIC_KEYS = KEYS.filter((k) => typeof DEFAULT_SETTINGS[k] === 'number');
 
+/**
+ * 枚举字段的合法值域（v1.4.29 数据一致性 F8）。
+ *
+ * 此前 loadSettings 只归一化数值字段，枚举字段存了非法值会原样下发 ——
+ * 虽然各消费点（resolveTaskSettings 白名单、pickDestination 等）有分散兜底，
+ * 但新增字段时极易漏。这里一处收口：非法值 → 回落默认值。
+ * （subtitleLan 是自由字符串，不设白名单。）
+ */
+const ENUM_KEYS = {
+  preferCodec: ['avc', 'hevc', 'av1'],
+  audioPreference: ['best', 'normal', 'lossless'],
+  downloadMode: ['merge', 'separate', 'audio', 'durl'],
+  danmakuFormat: ['ass', 'xml', 'srt', 'txt'],
+  subtitleFormat: ['srt', 'ass', 'txt'],
+  chapterFormat: ['txt', 'vtt'],
+  saveMode: ['ask', 'downloads'],
+};
+
 /** 读取全部设置（合并默认值）。 */
 export async function loadSettings() {
   const stored = await chrome.storage.local.get(KEYS);
@@ -85,6 +103,13 @@ export async function loadSettings() {
     if (merged[k] !== undefined && merged[k] !== null && merged[k] !== '') {
       const n = Number(merged[k]);
       if (Number.isFinite(n)) merged[k] = n;
+    }
+  }
+  // 枚举字段白名单校验：storage 被写坏（手改/旧版本字段淘汰/同步冲突）时
+  // 回落默认值，而不是把非法值透传给下游
+  for (const [k, allowed] of Object.entries(ENUM_KEYS)) {
+    if (merged[k] !== undefined && !allowed.includes(merged[k])) {
+      merged[k] = DEFAULT_SETTINGS[k];
     }
   }
   return merged;

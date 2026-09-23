@@ -5,7 +5,7 @@
 import { BiliApi, pickVideoTrack, pickAudioTrack, pickExactTrack } from '../core/api.js';
 import { QUALITIES, qualityShort } from '../core/quality.js';
 import { loadSettings, saveSettings, MODE_HINTS, AUDIO_UNAVAILABLE_HINT, estimateSizeBytes } from '../core/settings.js';
-import { extractVideoId, formatBytes, formatDuration, parseRangeExpr, sanitizeFilename, applyTemplate, formatNumber, escapeHtml, warn, dateVars } from '../core/util.js';
+import { extractVideoId, formatBytes, formatDuration, parseRangeExpr, sanitizeFilename, applyTemplate, formatNumber, escapeHtml, warn, dateVars, safeMediaUrl } from '../core/util.js';
 import { parseUgcSeason, isBatchableSeason, seasonToSpecs } from '../core/season.js';
 
 const $ = (id) => document.getElementById(id);
@@ -50,7 +50,12 @@ async function refreshLoginBadge() {
       badge.title = '未检测到 B 站登录状态，1080P 及以上清晰度可能不可用';
     }
   } catch {
-    $('loginBadge').textContent = '状态未知';
+    // v1.4.29 产品审查 F-12：只改文字不动 className/title，会残留"检查中…"气泡
+    // 且没有任何警示样式 —— 用户分不清"检查中"和"检查失败"。
+    const badge = $('loginBadge');
+    badge.textContent = '状态未知';
+    badge.className = 'bd-badge bd-badge--warn';
+    badge.title = '登录状态检查失败（网络异常？），1080P 及以上清晰度可能不可用';
   }
 }
 
@@ -105,10 +110,33 @@ async function parseManual(text) {
 async function loadVideo() {
   try {
     const spec = currentSpec;
-    // 番剧：seasonId（/bangumi/play/ss<id>）与 epId（ep<id>）都要能进。
-    // B 站的 /pgc/view/web/season 同时接受 season_id 与 ep_id，
-    // seasonInfo() 已按入参分流，这里把两个 id 都传下去。
-    if (spec.epId || spec.seasonId) {
+    // ★ 课程（cheese/pugv）入口（v1.4.29 产品审查 F-3）：
+    //
+    //   util.extractVideoId 专门识别 /cheese/play/ep|ss，api.playurl 也准备了
+    //   cheeseId 分支，但本函数此前没有 cheese 分流 —— cheeseId 落进 else 调
+    //   api.videoInfo(spec)，而 videoInfo 只认 bvid/aid → 课程链接一进弹窗必报
+    //   「请求缺少视频标识」。同一功能，content→dashboard 路径经
+    //   ensureSpecComplete 是通的，弹窗入口整条断裂。现在补上同源逻辑。
+    if (spec.cheeseId) {
+      const season = await api.cheeseSeason(spec.cheeseId);
+      const eps = season?.episodes || [];
+      // 有 cheeseId（ep 级）就精确匹配，只有 ss<id> 时取第一集
+      const ep = eps.find((e) => e.id === Number(spec.cheeseId)) || eps[0];
+      if (!ep || !ep.cid) throw new Error('未找到该课程集数（付费课程需已购买并保持登录）');
+      videoInfo = {
+        bvid: '',
+        aid: 0,
+        cid: ep.cid,
+        title: season?.title || ep.title || '课程视频',
+        pic: '',
+        pubdate: 0,
+        owner: { name: '', mid: 0 },
+        duration: 0,
+        pages: [{ page: 1, part: ep.title || '', cid: ep.cid, duration: 0 }],
+        cheeseId: Number(spec.cheeseId),
+      };
+      currentSpec = { ...spec, cid: ep.cid };
+    } else if (spec.epId || spec.seasonId) {
       const season = await api.seasonInfo(spec.seasonId, { epId: spec.epId });
       const eps = season.result?.episodes || [];
       // 有 epId 就精确匹配，只有 ss<id> 时取第一集
@@ -278,6 +306,8 @@ function renderQualityList() {
   }
   const listEl = $('qualityList');
   listEl.innerHTML = '';
+  listEl.setAttribute('role', 'radiogroup');
+  listEl.setAttribute('aria-label', '清晰度选择');
   for (const opt of options) {
     const el = document.createElement('div');
     el.className = `quality-item${opt.available ? '' : ' is-disabled'}${opt.quality === selectedQuality ? ' is-active' : ''}`;
@@ -290,9 +320,21 @@ function renderQualityList() {
       ${badges.join('')}
       <span class="q-size">${opt.available ? formatBytes(opt.size) : '不可用'}</span>`;
     if (opt.available) {
+      el.tabIndex = 0;
+      // v1.4.29 设计审查 C2：清晰度列表此前是纯 click 的 div —— 键盘用户
+      // **无法选择清晰度**（核心路径不可达）。补 role/tabindex/键盘事件。
+      el.setAttribute('role', 'radio');
+      el.setAttribute('aria-checked', String(opt.quality === selectedQuality));
       el.addEventListener('click', () => {
         selectedQuality = opt.quality;
         render();
+      });
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          selectedQuality = opt.quality;
+          render();
+        }
       });
     }
     listEl.appendChild(el);
@@ -304,12 +346,21 @@ function renderQualityList() {
 
 function render() {
   const info = videoInfo;
-  $('cover').src = info.pic || '';
+  // v1.4.29 安全审查 F-004：弹窗封面 <img src> 此前直接取接口字段，
+  // 是全库唯一没过白名单的展示型外部资源（下载侧 v1.4.28 已修）。
+  // img src 无脚本执行风险，但被篡改的 pic 会向任意域泄露 IP —— 统一收口。
+  $('cover').src = safeMediaUrl(info.pic || '').url || '';
   $('title').textContent = info.title || '';
+  // v1.4.29 设计审查 M4：两行截断的长标题必须有 title 兜底，否则看不到全文
+  $('title').title = info.title || '';
   const owner = info.owner?.name ? `UP：${info.owner.name}` : '';
   const dur = formatDuration(info.pages?.[currentSpec.pageIndex]?.duration || info.duration || 0);
-  $('subTitle').textContent = [owner, `${info.pages?.length || 1} 个分P`, dur].filter(Boolean).join(' · ');
-  $('stats').textContent = `${info.bvid || ''}${info.aid ? ` · av${info.aid}` : ''}`;
+  const subText = [owner, `${info.pages?.length || 1} 个分P`, dur].filter(Boolean).join(' · ');
+  $('subTitle').textContent = subText;
+  $('subTitle').title = subText;
+  const statsText = `${info.bvid || ''}${info.aid ? ` · av${info.aid}` : ''}`;
+  $('stats').textContent = statsText;
+  $('stats').title = statsText;
 
   // 清晰度（体积口径随下载方式变化，渲染逻辑见 renderQualityList）
   renderQualityList();
@@ -336,6 +387,8 @@ function render() {
         <input type="checkbox" ${selectedPages.has(i + 1) ? 'checked' : ''} />
         <span class="p-name">P${escapeHtml(p.page)} ${escapeHtml(p.part || '')}</span>
         <span class="p-dur">${formatDuration(p.duration || 0)}</span>`;
+      // v1.4.29 设计审查 M4：单行省略的分P标题加 title 兜底
+      label.querySelector('.p-name').title = `P${p.page} ${p.part || ''}`;
       label.querySelector('input').addEventListener('change', (e) => {
         if (e.target.checked) selectedPages.add(i + 1);
         else selectedPages.delete(i + 1);
@@ -354,12 +407,29 @@ function render() {
   if (ugcSeason) {
     seasonSection.hidden = false;
     $('seasonLabel').textContent = `下载整个合集（${ugcSeason.episodes.length} 集）`;
-    $('seasonHint').textContent = `《${ugcSeason.title}》—— 勾选后按合集逐集建任务`;
-    seasonCb.onchange = () => updateSummary();
+    const hintEl = $('seasonHint');
+    hintEl.textContent = `《${ugcSeason.title}》—— 勾选后按合集逐集建任务`;
+    // v1.4.29 设计审查 M5：seasonHint 现为单行省略，必须配 title 看全文
+    hintEl.title = hintEl.textContent;
+    // v1.4.29 产品审查 F-6：勾选合集后 collectSpecs 会忽略分P选择（只下全集），
+    // 但分P区此前照常可交互 —— 用户勾了 P2-P5 再勾合集，实际下全集且无任何提示。
+    // 现在锁定分P区并在 title 里说明原因。
+    const syncSeasonUi = () => {
+      const on = seasonCb.checked;
+      pagesSection.classList.toggle('is-locked', on);
+      pagesSection.title = on ? '已勾选「下载整个合集」：分P选择不生效，将下载全部剧集' : '';
+    };
+    seasonCb.onchange = () => {
+      syncSeasonUi();
+      updateSummary();
+    };
+    syncSeasonUi();
   } else {
     seasonSection.hidden = true;
     seasonCb.checked = false;
     seasonCb.onchange = null;
+    pagesSection.classList.remove('is-locked');
+    pagesSection.title = '';
   }
 
   // 附加内容
@@ -403,11 +473,22 @@ function collectSpecs() {
         pageIndex: 0,
         totalPages: 1,
         isBatch: true,
+        // ★ v1.4.29 产品审查 F-1：合集分支此前漏了 downloadMode —— 弹窗里选的
+        //   「音视频分离/仅音频」对合集**静默失效**（回落全局设置），与 v1.4.28
+        //   修的 P1-3（separate 保存位置丢弃）同类：UI 声称「本次生效」、代码丢弃。
+        downloadMode: currentMode(),
         quality: selectedQuality,
         qualityShort: qOpt?.short || '',
         title: s.title || ugcSeason.title || '',
         filename: sanitizeFilename(filename),
         cover: s.cover || info?.pic || '',
+        // v1.4.29 产品审查 F-9：seasonToSpecs 刻意标记的合集元数据，此前被本处
+        // 重建对象时全部丢弃 —— season.js 的「便于下游（如 NFO）判断这是合集
+        // 里的一集」承诺落空。透传补上。
+        fromSeason: true,
+        seasonId: ugcSeason.id || 0,
+        seasonTitle: ugcSeason.title || '',
+        seasonIndex: s.index,
         info: {
           title: s.title || ugcSeason.title,
           bvid: s.bvid,
@@ -484,7 +565,10 @@ function collectSpecs() {
         pages: info.pages,
       },
       page: page ? { page: page.page, part: page.part, cid: page.cid, duration: page.duration } : null,
-      sourceUrl: `https://www.bilibili.com/video/${info.bvid || `av${info.aid}`}${total > 1 ? `?p=${p}` : ''}`,
+      // v1.4.29 产品审查 F-3：课程任务没有 bvid/aid，sourceUrl 指向课程页
+      sourceUrl: currentSpec.cheeseId
+        ? `https://www.bilibili.com/cheese/play/ep${currentSpec.cheeseId}`
+        : `https://www.bilibili.com/video/${info.bvid || `av${info.aid}`}${total > 1 ? `?p=${p}` : ''}`,
     };
   });
 }
@@ -542,11 +626,23 @@ async function startDownload() {
     saveSubtitle: $('optSubtitle').checked,
     saveCover: $('optCover').checked,
   });
-  const res = await chrome.runtime.sendMessage({
-    type: 'OPEN_DASHBOARD',
-    payload: { tasks: specs, focus: true },
-  });
-  if (res?.ok) window.close();
+  // v1.4.29 产品审查 F-12：sendMessage 失败（SW 未起/异常）此前无任何反馈，
+  // 弹窗表现为「点了没反应」。
+  let res = null;
+  try {
+    res = await chrome.runtime.sendMessage({
+      type: 'OPEN_DASHBOARD',
+      payload: { tasks: specs, focus: true },
+    });
+  } catch (err) {
+    showState('error', `无法连接下载中心：${err?.message || err}`);
+    return;
+  }
+  if (res?.ok) {
+    window.close();
+  } else {
+    showState('error', '任务派发失败，请点「重试」重新解析后再试');
+  }
 }
 
 function bindEvents() {
@@ -574,6 +670,10 @@ function bindEvents() {
     const total = videoInfo?.pages?.length || 1;
     selectedPages = new Set(parseRangeExpr($('rangeInput').value, total));
     render();
+  });
+  // v1.4.29 设计审查 m5：范围输入框此前不响应回车（只有手动解析框有）
+  $('rangeInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') $('btnApplyRange').click();
   });
 
   document.querySelectorAll('input[name="mode"]').forEach((r) => {

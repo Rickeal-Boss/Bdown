@@ -647,5 +647,49 @@ console.log('\n[9] 切换下载方式后清晰度列表体积必须重算（B-5�
   });
 }
 
+console.log('\n[10] v1.4.29 六路审查修复回归守卫（DOM 模块用源码断言）');
+{
+  const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const read = (rel) => {
+    try { return readFileSync(join(ROOT, rel), 'utf8'); } catch { return ''; }
+  };
+  const POPUP_JS = read('src/popup/popup.js');
+  const DASH_JS = read('src/dashboard/dashboard.js');
+  const ENGINE_JS = read('src/core/engine.js');
+  const COMMON_CSS = read('src/ui/common.css');
+
+  // F-1（产品官）：合集 spec 必须带 downloadMode —— 弹窗「本次生效」对合集不能再静默失效
+  check('合集 spec 带 downloadMode（与普通分支同源 currentMode()）', () => {
+    const n = (POPUP_JS.match(/downloadMode: currentMode\(\)/g) || []).length;
+    return n >= 2 ? '' : `downloadMode: currentMode() 仅出现 ${n} 次（需 ≥2：普通分支 + 合集分支）`;
+  });
+  // F-3（产品官）：课程入口必须走 cheeseSeason 反查，不能落进 videoInfo(bvid/aid)
+  check('弹窗 loadVideo 有 cheese 分支（api.cheeseSeason）', () =>
+    POPUP_JS.includes('api.cheeseSeason(') ? '' : '课程链接进弹窗仍会走 videoInfo(bvid/aid) 必报错');
+  // F-2（产品官）：startAll/pump/runTracked 收尾必须统一走 finishTracked（prune+release 不再漏）
+  check('任务收尾统一走 finishTracked（≥3 处调用）', () => {
+    const n = (DASH_JS.match(/finishTracked\(/g) || []).length;
+    return n >= 3 ? '' : `finishTracked 仅出现 ${n} 次（需 ≥3：定义 + startAll + pump + runTracked）`;
+  });
+  // 运行时 F2 / 数据一致性 F1：移除任务后的 emit 不得重建节点（幽灵卡）
+  check('renderTask 对已移除任务短路（removedIds 守卫）', () =>
+    DASH_JS.includes('removedIds.has(task.id)') ? '' : '幽灵卡片守卫缺失');
+  // 数据一致性 F3：恢复的 paused 任务必须注册防重指纹（否则可双写同一 .part）
+  check('loadPendingTasks 恢复 paused 任务时注册 consumedSpecKeys', () =>
+    DASH_JS.includes('consumedSpecKeys.add(specKey(task.spec') ? '' : '跨会话 paused 指纹缺口仍在（可双写同一 .part）');
+  // 运行时 F1：暂停/取消落在 fetchTo 重试子路径时也必须关 sink + 落清单
+  check('fetchTo 重试子路径的 abort 统一走 abortExit 收尾（≥3 处调用）', () => {
+    const n = (ENGINE_JS.match(/await abortExit\(\)/g) || []).length;
+    return n >= 3 ? '' : `abortExit 调用仅 ${n} 处（需 ≥3：主分支 + 两条重试子路径 + 顺序回退前）`;
+  });
+  // 安全 F-001：字幕非白名单直接跳过（与封面对齐，不再降级 fetch）
+  check('字幕非白名单直接跳过（不再降级 fetch）', () =>
+    ENGINE_JS.includes('已跳过该字幕') && !ENGINE_JS.includes("credentials: safe ? 'include' : 'omit'")
+      ? '' : '字幕降级 fetch 路径仍在');
+  // C1（设计）：焦点样式必须真实存在 —— 上一轮声称已补但从未落地的教训
+  check('common.css 存在 :focus-visible 全局焦点样式', () =>
+    COMMON_CSS.includes(':focus-visible') ? '' : '焦点样式缺失（v1.4.28 声称补过但从未落地的教训）');
+}
+
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 核心自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);
 process.exit(fail === 0 ? 0 : 1);

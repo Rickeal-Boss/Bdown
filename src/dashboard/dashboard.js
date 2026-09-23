@@ -20,6 +20,15 @@ let settings = null;
 let engine = null;
 /** @type {Map<string, HTMLElement>} */
 const nodes = new Map();
+/**
+ * 本会话内已被用户「移除」的任务 id（v1.4.29 运行时 F2 / 数据一致性 F1）。
+ *
+ * 为什么需要：act-remove 同步删掉 DOM 节点并从 engine.tasks 滤掉任务后，
+ * 引擎里还在跑的 run() 稍后会 catch 到取消、setStatus('canceled') 并 emit ——
+ * onUpdate → renderTask → ensureNode 会**无条件重建节点**，被移除的任务以
+ * 「已取消」幽灵卡复活。渲染入口据此短路。
+ */
+const removedIds = new Set();
 /** 会话内记住的目录句柄（批量任务复用） */
 let rememberedDir = null;
 let runningCount = 0;
@@ -101,10 +110,14 @@ function ensureNode(task) {
     // 移除一个「已暂停」的任务 = 用户放弃这次续传 → 必须把清单和 .part 一起删掉，
     // 否则它会永久占着 OPFS，且下次同一视频可能续到这份残缺数据上。
     // （downloading 中途取消的清单由 run() 的 catch 分支清；paused 到这里的清单只能在这里清。）
-    if (task.status === 'paused') {
-      task.paused = false;
+    if (task.status === 'paused' || task.status === 'error') {
+      if (task.status === 'paused') task.paused = false;
+      // v1.4.29 数据一致性 F2：error 任务的清单与 .part 是刻意保留供「重试」的，
+      // 但用户主动移除 = 放弃这次下载 —— 不清的话 .part/.json 永久占着 OPFS
+      // （「清理临时文件」只清 bdown-tmp，碰不到 bdown-resume）。
       engine.discardResume(task).catch(() => {});
     }
+    removedIds.add(task.id);
     el.remove();
     nodes.delete(task.id);
     engine.tasks = engine.tasks.filter((t) => t.id !== task.id);
@@ -142,6 +155,9 @@ const STATUS_CLASS = {
 };
 
 function renderTask(task) {
+  // v1.4.29 运行时 F2：已被移除的任务不再渲染（否则 ensureNode 会把它画回来，
+  // 详见 removedIds 的说明）。
+  if (removedIds.has(task.id)) return;
   const el = ensureNode(task);
   el.dataset.status = task.status;
   // ★ 「暂停」按钮只在开启断点续传时才有意义。
@@ -163,7 +179,8 @@ function renderTask(task) {
   }${task.status === 'done' ? ' is-done' : ''}${task.status === 'error' ? ' is-error' : ''}`;
 
   el.querySelector('.t-name').textContent = task.title || task.filename || '未命名任务';
-  el.querySelector('.t-sub').textContent = [
+  el.querySelector('.t-name').title = task.title || task.filename || '';
+  const subText = [
     task.filename,
     task.quality ? `${task.quality} · ${qualityShort(task.quality)}` : '',
     task.codec,
@@ -171,6 +188,10 @@ function renderTask(task) {
   ]
     .filter(Boolean)
     .join(' · ');
+  // v1.4.29 设计审查 M4：长文件名 .t-sub 单行截断无兜底，补 title
+  const subEl = el.querySelector('.t-sub');
+  subEl.textContent = subText;
+  subEl.title = subText;
 
   const badge = el.querySelector('.t-status');
   badge.textContent = STATUS_TEXT[task.status] || task.status;
@@ -210,7 +231,7 @@ function updateCounts() {
  * 任务调度
  * ------------------------------------------------------------------ */
 
-async function pickDestination(taskCount) {
+async function pickDestination(taskCount, task = null) {
   if (settings.saveMode === 'downloads') return { kind: 'downloads' };
 
   try {
@@ -220,7 +241,10 @@ async function pickDestination(taskCount) {
       if ($('rememberDir').checked) rememberedDir = dir;
       return { kind: 'dir', dir };
     }
-    const task = engine.tasks.find((t) => t.status === 'pending');
+    // v1.4.29 产品审查 F-5：建议名/类型此前取「列表里第一个 pending 任务」——
+    // 列表有多个 pending 时，点第 3 个任务的「开始」，对话框建议的却是第 1 个
+    // 任务的名字，用户直接确认后产物名与内容不符。调用方现在显式传任务进来。
+    const t = task || engine.tasks.find((x) => x.status === 'pending');
     // ★ 扩展名要跟着「下载方式」走。
     //
     // 原来一律建议 `.mp4`、类型也只给 `video/mp4`。而「仅音频」模式是
@@ -228,8 +252,8 @@ async function pickDestination(taskCount) {
     // `xxx.mp4` 却只有音频，面板里显示的却是 `xxx.m4a`，两边对不上。
     // 无损轨是否建议 `.flac` 无法在此判定（plan 与音轨 mimeType 都还没有），
     // 由 savePickerHint 在 description 里提示用户按实际音质手动改。
-    const mode = task?.spec?.downloadMode || settings.downloadMode;
-    const name = task?.filename || 'bilibili';
+    const mode = t?.spec?.downloadMode || settings.downloadMode;
+    const name = t?.filename || 'bilibili';
 
     // ★ 「音视频分离」是**两文件**输出（singleOutput:false），单文件句柄用不上：
     //   engine 走 OPFS 临时文件后经 exportFile 落盘，而 exportFile 只认目录目的地，
@@ -285,10 +309,58 @@ async function prunePendingTask(task) {
 }
 
 /**
- * 运行一个任务并维护全局计数 / 持久化 / 队列泵。
+ * 任务收尾（v1.4.29 产品审查 F-2）：计数 / 持久化 / 清 pendingTasks / 释放指纹 / 泵。
  *
- * 「开始」「继续」「重试」三条路径共用它，避免把 finally 里的收尾逻辑复制三份
- * （复制三份的下场就是其中一份漏改 —— 本项目已经因此踩过好几次）。
+ * ★ startAll 与 pump 的 finally 此前各自复制了其中一半（漏掉 prunePendingTask
+ *   和 releaseSpecKey），后果：
+ *   ① 「全部开始」/ downloads 泵跑完的任务不释放指纹 → 同会话内再下载同一视频
+ *      被 acceptPending 静默吞掉（连 toast 都没有）；
+ *   ② storage 里的 pendingTasks 条目不清理。
+ *   runTracked 注释里"复制三份必漏一份"的教训再次应验 —— 三条路径现在共用本函数。
+ *
+ * @param {object} task 已到终态的任务
+ * @param {{ notify?: boolean }} [opts] runTracked 路径需要完成通知（toast + 徽章）
+ */
+async function finishTracked(task, { notify = false } = {}) {
+  runningCount -= 1;
+  updateCounts();
+  persistHistory();
+  // 任务已到终态（done / error / canceled）：把 chrome.storage 里对应的
+  // pendingTasks 条目清掉。否则用户取消后关掉下载中心再打开，
+  // 那个已取消的任务会被重新入队（用户以为自己取消成功了）。
+  await prunePendingTask(task);
+  // 释放指纹：允许同一会话内再次下载这个视频（例如换个清晰度重下）。
+  // ★ paused **不释放** —— 它还留在列表里等着被「继续」，此时若放行同名派发
+  //   会建出第二个同内容任务，继续时两路写同一个 .part，文件必坏。
+  if (task.status !== 'paused') releaseSpecKey(task);
+  if (notify && task.status === 'done' && settings.notifyOnComplete) {
+    showToast(`已完成：${task.filename || task.title}`);
+    // 下载中心在**后台标签页**时，页面内的 toast 用户根本看不到。
+    //
+    // 这里用扩展图标徽章补上：chrome.action.setBadgeText **不需要 notifications 权限**
+    // （声明了 action 即可用），因此不会给安装流程增加权限警告 ——
+    // 项目此前刻意移除过 notifications 权限（见 PRIVACY.md）。
+    // 页面重新可见时徽章会被清掉（见下方 visibilitychange）。
+    if (document.hidden) {
+      // 注意 `a?.b?.().catch?.()` 这种写法**并不安全**：若方法存在但返回 undefined
+      // （MV2 风格回调式 API 就是这样），`undefined.catch` 会直接抛 TypeError。
+      // 可选链只短路 `?.` 左侧，保护不了后面的属性访问。改用 try/catch。
+      try {
+        const p = chrome.action?.setBadgeBackgroundColor?.({ color: '#2ecc71' });
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+        const q = chrome.action?.setBadgeText?.({ text: '✓' });
+        if (q && typeof q.catch === 'function') q.catch(() => {});
+      } catch { /* 徽章不可用不影响下载本身 */ }
+    }
+  }
+  pump();
+}
+
+/**
+ * 运行一个任务并维护计数 / 持久化 / 队列泵。
+ *
+ * 「开始」「继续」「重试」三条路径共用它 —— 收尾逻辑集中在 finishTracked，
+ * 避免复制（复制三份的下场就是其中一份漏改 —— 本项目已经因此踩过好几次）。
  */
 async function runTracked(task, destination) {
   task.lastDestination = destination;
@@ -297,44 +369,26 @@ async function runTracked(task, destination) {
   try {
     await engine.run(task, destination);
   } finally {
-    runningCount -= 1;
-    updateCounts();
-    persistHistory();
-    // 任务已到终态（done / error / canceled）：把 chrome.storage 里对应的
-    // pendingTasks 条目清掉。否则用户取消后关掉下载中心再打开，
-    // 那个已取消的任务会被重新入队（用户以为自己取消成功了）。
-    await prunePendingTask(task);
-    // 释放指纹：允许同一会话内再次下载这个视频（例如换个清晰度重下）。
-    // ★ paused **不释放** —— 它还留在列表里等着被「继续」，此时若放行同名派发
-    //   会建出第二个同内容任务，继续时两路写同一个 .part，文件必坏。
-    if (task.status !== 'paused') releaseSpecKey(task);
-    if (task.status === 'done' && settings.notifyOnComplete) {
-      showToast(`已完成：${task.filename || task.title}`);
-      // 下载中心在**后台标签页**时，页面内的 toast 用户根本看不到。
-      //
-      // 这里用扩展图标徽章补上：chrome.action.setBadgeText **不需要 notifications 权限**
-      // （声明了 action 即可用），因此不会给安装流程增加权限警告 ——
-      // 项目此前刻意移除过 notifications 权限（见 PRIVACY.md）。
-      // 页面重新可见时徽章会被清掉（见下方 visibilitychange）。
-      if (document.hidden) {
-        // 注意 `a?.b?.().catch?.()` 这种写法**并不安全**：若方法存在但返回 undefined
-        // （MV2 风格回调式 API 就是这样），`undefined.catch` 会直接抛 TypeError。
-        // 可选链只短路 `?.` 左侧，保护不了后面的属性访问。改用 try/catch。
-        try {
-          const p = chrome.action?.setBadgeBackgroundColor?.({ color: '#2ecc71' });
-          if (p && typeof p.catch === 'function') p.catch(() => {});
-          const q = chrome.action?.setBadgeText?.({ text: '✓' });
-          if (q && typeof q.catch === 'function') q.catch(() => {});
-        } catch { /* 徽章不可用不影响下载本身 */ }
-      }
-    }
-    pump();
+    await finishTracked(task, { notify: true });
+  }
+}
+
+/**
+ * v1.4.29 产品审查 F-4：ask + 单文件模式下，主文件直写用户选的文件句柄，
+ * 但附加产物（弹幕/字幕/封面/章节/NFO）只能经 chrome.downloads 落浏览器
+ * 下载目录（exportFile 只认目录目的地）。位置分离本身是 File System Access
+ * API 的限制，不再静默 —— 至少告诉用户附加文件去了哪。
+ */
+function warnExtrasToDownloads(destination) {
+  const extrasOn = settings.saveDanmaku || settings.saveSubtitle || settings.saveCover
+    || settings.saveChapters || settings.saveNfo;
+  if (destination?.kind === 'file' && extrasOn) {
+    showToast('提示：弹幕/字幕等附加文件将保存到浏览器下载目录');
   }
 }
 
 /** 并发槽位是否已满。满则返回提示文案，否则返回 ''。 */
-function slotBusyMessage() {
-  const maxParallel = Math.max(1, settings.maxParallelTasks || 2);
+function slotBusyMessage() {  const maxParallel = Math.max(1, settings.maxParallelTasks || 2);
   // ★ 尊重「同时下载的任务数」设置。
   //
   // 旧实现这里**完全没有检查** runningCount —— 于是逐个点「开始」时想跑几个跑几个，
@@ -356,8 +410,16 @@ async function startTask(task) {
     showToast(busy);
     return;
   }
-  const destination = await pickDestination(1);
+  const destination = await pickDestination(1, task);
   if (!destination) return;
+  warnExtrasToDownloads(destination);
+  // v1.4.29 运行时 F5：选择器弹窗期间（可能挂几十秒）其他任务可能已启动，
+  // 返回后必须复查槽位，否则 maxParallel 可被突破。
+  const busyAfterPicker = slotBusyMessage();
+  if (busyAfterPicker) {
+    showToast(busyAfterPicker);
+    return;
+  }
   await runTracked(task, destination);
 }
 
@@ -431,13 +493,14 @@ async function resolveDestination(task) {
   //   lastDestination 是内存里的句柄，不会随历史一起存下来）时必须**问用户**，
   //   不能默默退回浏览器下载目录 —— 用户当初明明选了文件夹，续着续着文件跑到了
   //   ~/Downloads，还以为是扩展丢了设置。
-  if (!prev) return pickDestination(1);
+  // v1.4.29 产品审查 F-5：显式把任务传给 pickDestination，建议名/类型才对得上本任务。
+  if (!prev) return pickDestination(1, task);
   if (prev.kind === 'downloads') return { kind: 'downloads' };
   const handle = prev.kind === 'dir' ? prev.dir : prev.handle;
-  if (!handle) return pickDestination(1);
+  if (!handle) return pickDestination(1, task);
   if (await ensurePermission(handle, 'readwrite')) return prev;
   showToast('保存位置的授权已失效，请重新选择');
-  return pickDestination(1);
+  return pickDestination(1, task);
 }
 
 /** 继续一个已暂停的任务。 */
@@ -453,6 +516,12 @@ async function resumeTask(task) {
   // null = 用户在保存位置选择器里点了取消。此时**保持 paused**，
   // 不能把状态改成 canceled —— 用户只是还没决定存哪，不是要放弃。
   if (!destination) return;
+  // v1.4.29 运行时 F5：选择器期间槽位可能被占满，返回后复查
+  const busyAfterPicker = slotBusyMessage();
+  if (busyAfterPicker) {
+    showToast(busyAfterPicker);
+    return;
+  }
 
   // 重置运行态字段，但**保留** downloadedBytes / totalBytes / progress：
   // 保留它们，进度条才会从断点接着走，而不是先跳回 0 吓用户一跳。
@@ -483,9 +552,11 @@ async function startAll() {
     destination = await pickDestination(2);
     if (!destination) return;
   } else {
-    destination = await pickDestination(1);
+    // v1.4.29 产品审查 F-5：单任务路径也把任务传进去，建议名/类型才正确
+    destination = await pickDestination(1, pending[0]);
     if (!destination) return;
   }
+  warnExtrasToDownloads(destination);
 
   for (const task of pending) {
     if (task.status !== 'pending') continue;
@@ -494,12 +565,10 @@ async function startAll() {
     engine
       .run(task, destination)
       .catch((err) => log('任务异常', err))
-      .finally(() => {
-        runningCount -= 1;
-        updateCounts();
-        persistHistory();
-        pump();
-      });
+      // v1.4.29 产品审查 F-2：收尾必须走 finishTracked —— 此前这里复制的
+      // 精简版漏了 prunePendingTask 和 releaseSpecKey（指纹不释放 → 同会话
+      // 内再下载同一视频被静默吞掉；pendingTasks 条目不清 → 可能复活）。
+      .finally(() => finishTracked(task));
     // 简单限流：达到并发上限时等待
     while (runningCount >= Math.max(1, settings.maxParallelTasks || 2)) {
       await new Promise((r) => setTimeout(r, 400));
@@ -520,12 +589,9 @@ function pump() {
   engine
     .run(next, { kind: 'downloads' })
     .catch((err) => log('任务异常', err))
-    .finally(() => {
-      runningCount -= 1;
-      updateCounts();
-      persistHistory();
-      pump();
-    });
+    // v1.4.29 产品审查 F-2：同 startAll，收尾必须走 finishTracked（此前漏
+    // prunePendingTask / releaseSpecKey）
+    .finally(() => finishTracked(next));
 }
 
 /* ------------------------------------------------------------------ *
@@ -630,7 +696,15 @@ async function loadPendingTasks() {
     task.finishedAt = rec.finishedAt;
     // 恢复「已暂停」任务的续传归属：不还原就再也清不掉它的 .part（见上方说明）
     task.resumeKeys = Array.isArray(rec.resumeKeys) ? [...rec.resumeKeys] : [];
-    if (task.status === 'paused') task.paused = true;
+    if (task.status === 'paused') {
+      task.paused = true;
+      // v1.4.29 数据一致性 F3：恢复的 paused 任务此前不注册防重指纹 ——
+      // 用户先重新派发同一视频、再点「继续」时，两个任务会并发写同一
+      // resumeKey 的 .part/.json（正是 fetchTo 注释里"同一 OPFS 文件两个
+      // writable 并存"的坏文件场景）。会话内 paused 不释放指纹（见
+      // finishTracked），恢复时也要把它占住。
+      try { consumedSpecKeys.add(specKey(task.spec || {})); } catch { /* ignore */ }
+    }
       engine.tasks.push(task);
       renderTask(task);
     }
@@ -664,6 +738,9 @@ async function init() {
   onSettingsChanged((patch) => {
     settings = { ...settings, ...patch };
     engine.updateSettings(settings);
+    // v1.4.29 产品审查 F-8 / 数据一致性 F9：设置页改「保存方式」后，
+    // 本页下拉此前不回写 —— 显示值与实际生效值相反，用户改回即覆盖。
+    $('saveMode').value = settings.saveMode;
     // 「断点续传」开关直接决定「暂停」按钮显隐（写在 data-resume 上），
     // 所以设置一变就要把所有任务卡重渲染一遍，否则按钮状态是旧的。
     for (const t of engine.tasks) renderTask(t);
@@ -680,8 +757,20 @@ async function init() {
   $('btnOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
   $('btnClean').addEventListener('click', async () => {
     await engine.cleanupAll();
+    // v1.4.29 数据一致性 F2：「清理临时文件」此前只清 bdown-tmp，碰不到
+    // bdown-resume —— error/被遗忘的续传 .part 永久占空间。没有进行中/
+    // 暂停任务时一并清掉续传缓存（有则跳过，避免破坏在用的续传数据）。
+    let extra = '';
+    const hasLive = engine.tasks.some((t) =>
+      ['downloading', 'paused', 'resolving', 'muxing', 'saving'].includes(t.status));
+    if (!hasLive) {
+      try {
+        await new OpfsWorkspace('bdown-resume').clear();
+        extra = '，续传缓存已清';
+      } catch { /* 清不掉不影响主流程 */ }
+    }
     await refreshStorageBadge();
-    showToast('临时文件已清理');
+    showToast(`临时文件已清理${extra}`);
   });
   $('btnStartAll').addEventListener('click', () => startAll().catch((e) => showToast(e.message)));
   $('btnPauseAll').addEventListener('click', () => {
@@ -724,6 +813,10 @@ async function init() {
   $('btnClearDone').addEventListener('click', () => {
     for (const t of [...engine.tasks]) {
       if (['done', 'error', 'canceled'].includes(t.status)) {
+        // v1.4.29 数据一致性 F2：error 任务的清单/.part 是留给「重试」的，
+        // 批量清除 = 放弃 → 一并清掉（与单个移除的行为一致）
+        if (t.status === 'error') engine.discardResume(t).catch(() => {});
+        removedIds.add(t.id);
         nodes.get(t.id)?.remove();
         nodes.delete(t.id);
         // 清掉任务时也要释放指纹，否则这个视频在本会话内再也下不了

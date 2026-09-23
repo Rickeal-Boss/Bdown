@@ -119,9 +119,11 @@ main {
 }
 
 .task.is-paused {
-  border-color: var(--bd-warn, #e2a33c);
-  border-left: 3px solid var(--bd-warn, #e2a33c);
-  background: rgba(226, 163, 60, 0.06);
+  /* v1.4.29 设计审查 M3：#e2a33c 是游离于 token 体系外的第三套 warn 色，
+     且 var(--bd-warn, #e2a33c) 的 fallback 是死代码（--bd-warn 恒有值）。统一走 token。 */
+  border-color: var(--bd-warn);
+  border-left: 3px solid var(--bd-warn);
+  background: rgba(255, 152, 0, 0.06);
 }
 
 .task-head {
@@ -227,5 +229,12 @@ main {
   from {
     opacity: 0;
     transform: translate(-50%, 8px);
+  }
+}
+
+/* v1.4.29 设计审查 m3：减弱动态偏好下关闭 toast 动画 */
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
   }
 }

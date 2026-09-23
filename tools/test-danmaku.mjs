@@ -160,5 +160,16 @@ console.log('\n[8] 边界：空输入与异常时间');
   ok('负时间不抛错（被 clamp 到 0）', !threw && !!assNeg);
 }
 
+console.log('\n[9] Title 头部换行安全（v1.4.28 修复的回归守卫：UP 主可控标题不得破坏 ASS 结构）');
+{
+  const ass = danmakuToAss([mk(1, '普通弹幕')], { ...OPTS, title: '恶意标题\n第二行' });
+  const titleLines = ass.split('\n').filter((l) => l.startsWith('Title:'));
+  ok('Title: 行只有一条（换行没有制造第二个头部字段）', titleLines.length === 1,
+    JSON.stringify(ass.split('\n').slice(0, 6)));
+  const titleLine = titleLines[0] || '';
+  ok('Title: 行内无裸换行（换行被折叠成空格）',
+    titleLine.includes('恶意标题') && !titleLine.includes('\n'), JSON.stringify(titleLine));
+}
+
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 弹幕模块自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);
 process.exit(fail === 0 ? 0 : 1);

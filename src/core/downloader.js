@@ -540,7 +540,13 @@ export async function downloadRanged({
           const out = await retry(() => fetchRange(url, range, workerSignal), {
             times: attemptsPerUrl,
             baseDelay: 500,
-            shouldRetry: (err) => !(err instanceof DownloadAborted) && !err?.rangeIgnored,
+            // v1.4.29 运行时 F6：abort 落在重试退避 sleep 期间时，旧逻辑后续每次
+            // attempt 都「立即 AbortError + 继续睡满退避」，单个 worker 最多多耗
+            // ~7.5s 才收工。signal 已 abort 就不必再试。
+            shouldRetry: (err) =>
+              !workerSignal.aborted &&
+              !(err instanceof DownloadAborted) &&
+              !err?.rangeIgnored,
           });
           throwIfAborted();
           await sink.writeAt(range.start + writeOffset, out.bytes);
@@ -559,7 +565,12 @@ export async function downloadRanged({
           if (workerSignal.aborted) throw new DownloadAborted();
           // 服务器不支持 Range：分片下载这条路走不通，立即放弃。
           // 继续重试/换备用地址只会把整个文件重复下载一遍又一遍。
-          if (err?.rangeIgnored) throw err;
+          if (err?.rangeIgnored) {
+            // v1.4.29 运行时 F8：此前不 abort —— 其余 worker 各自先 readBody
+            // 读完整 200 全量 body 才失败，N 并发瞬时内存峰值可达 N×文件大小。
+            ctrl.abort();
+            throw err;
+          }
           // 备用地址连续失败 → 关掉轮换（多半是缺签参），退回主地址
           if (url !== list[0] && ++backupFailures >= 2) rotate = false;
           lastError = err;
@@ -583,9 +594,20 @@ export async function downloadRanged({
   //   再向上抛第一个真实错误。旧的 Promise.all 首错即抛、straggler 还在写 sink，
   //   上层重试时就会新旧并发写同一 sink。
   const results = await Promise.allSettled(workers);
+  // v1.4.29 运行时 F7：失败路径也要把「已完成但还没上报」的分片区间刷进清单。
+  // 旧的 report(true) 只在成功路径执行 —— 最后 ≤300ms 完成的区间丢失，
+  // 续传清单低估，下次继续时这些已在 .part 里的字节被原样重下一遍（纯浪费）。
   const failed = results.filter((r) => r.status === 'rejected').map((r) => r.reason);
-  const real = failed.find((e) => !(e instanceof DownloadAborted));
-  if (real) throw real;
+  if (failed.length) {
+    try { report(true); } catch { /* 清单落盘失败不影响错误上报 */ }
+  }
+  const real = failed.filter((e) => !(e instanceof DownloadAborted));
+  // v1.4.29 运行时 F3：failed 顺序 = worker 创建序而非失败时间序。若 worker0
+  // 死于普通网络错误、worker5 死于 403（地址过期），旧的 find 取到索引靠前的
+  // 那个 → 无 status → isUrlExpiredError=false → 过期换址被跳过，退化为拿
+  // 过期地址反复重试。优先挑带过期特征 status 的错误作为「首错」。
+  const primary = real.find((e) => e?.status === 403 || e?.status === 404 || e?.status === 410) || real[0];
+  if (primary) throw primary;
   if (failed.length) throw new DownloadAborted();
   report(true);
   return { bytes: downloaded, elapsed: (performance.now() - startedAt) / 1000, size };

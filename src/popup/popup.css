@@ -190,6 +190,13 @@ code {
   cursor: not-allowed;
 }
 
+/* v1.4.29 设计审查 m1：暗色下 0.07 的选中背景几乎不可见（选中态仅靠 1px 粉边） */
+@media (prefers-color-scheme: dark) {
+  .quality-item.is-active {
+    background: rgba(251, 114, 153, 0.13);
+  }
+}
+
 .quality-item .q-name {
   font-size: 13px;
   font-weight: 600;
@@ -237,6 +244,28 @@ code {
   color: var(--bd-pink);
   font-weight: 600;
   box-shadow: var(--bd-shadow);
+}
+
+/* v1.4.29 设计审查 C1：分段控件的 input 是 opacity:0 的隐形元素，
+   键盘焦点必须画在可视的 span 上（common.css 的全局 :focus-visible 照不到它） */
+.segmented input:focus-visible + span {
+  outline: 2px solid var(--bd-blue);
+  outline-offset: 2px;
+}
+
+/* v1.4.29 产品审查 F-6：勾选「下载整个合集」后分P选择不生效，
+   视觉锁定（区别于 is-muted —— 那个允许交互） */
+.section.is-locked {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* v1.4.29 设计审查 M5：超长合集名会把 section-head 撑高换行，单行省略 */
+#seasonHint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pages {

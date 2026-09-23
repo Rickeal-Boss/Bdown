@@ -29,17 +29,29 @@ export const RESUME_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  * @param {number} [o.aid]
  * @param {number} o.cid
  * @param {number} [o.epId]
+ * @param {number} [o.cheeseId] 课程 ep id（v1.4.29：课程任务只有它，缺了 key 为空 → 无续传）
  * @param {number} [o.quality]
  * @param {string} [o.codec]
  * @param {'v'|'a'} [o.track] 视轨 / 音轨
+ * @param {number} [o.trackId] 实际选中的轨道 id（v1.4.29：换音质偏好后 size 恰好
+ *   相等时，旧 key 会把 A 音轨的字节续进 B 音轨 —— 并入轨道 id 隔离）
  */
-export function resumeKey({ bvid, aid, cid, epId, quality, codec, track } = {}) {
-  const id = bvid ? `bv${bvid}` : aid ? `av${aid}` : epId ? `ep${epId}` : '';
+export function resumeKey({ bvid, aid, cid, epId, cheeseId, quality, codec, track, trackId } = {}) {
+  const id = bvid
+    ? `bv${bvid}`
+    : aid
+      ? `av${aid}`
+      : epId
+        ? `ep${epId}`
+        : cheeseId
+          ? `ch${cheeseId}`
+          : '';
   if (!id || !Number.isFinite(Number(cid))) return '';
   const parts = [id, `c${Number(cid)}`];
   if (Number.isFinite(Number(quality))) parts.push(`q${Number(quality)}`);
   if (codec) parts.push(String(codec).replace(/[^A-Za-z0-9]/g, ''));
   if (track) parts.push(track === 'a' ? 'a' : 'v');
+  if (Number.isFinite(Number(trackId)) && Number(trackId) > 0) parts.push(`t${Number(trackId)}`);
   return parts.join('_');
 }
 

@@ -77,7 +77,7 @@ export function formatVttTimestamp(seconds) {
 export function chaptersToTxt(chapters) {
   const list = Array.isArray(chapters) ? chapters : [];
   if (!list.length) return '';
-  return `${list.map((c) => `${formatTimestamp(c.start)} ${c.content}`).join('\n')}\n`;
+  return `${list.map((c) => `${formatTimestamp(c.start)} ${cleanChapterText(c.content)}`).join('\n')}\n`;
 }
 
 /** 导出 WebVTT 章节轨 */
@@ -89,11 +89,22 @@ export function chaptersToVtt(chapters) {
     const end = c.end !== null && c.end !== undefined ? c.end : c.start + 1;
     lines.push(formatVttTimestamp(c.start));
     lines.push(`${formatVttTimestamp(c.start)} --> ${formatVttTimestamp(end)}`);
-    lines.push(c.content);
+    lines.push(cleanChapterText(c.content));
     lines.push('');
   }
   return lines.join('\n');
 }
 
-export const CHAPTER_TXT_NAME = 'chapters.txt';
-export const CHAPTER_VTT_NAME = 'chapters.vtt';
+/**
+ * v1.4.29 安全审查 F-003：章节标题（UP 主可控）此前原样写入导出文件 ——
+ * 内容含空行会把 VTT cue / TXT 条目切开，产出结构损坏的章节文件。
+ * 对照：SRT 有 normalizeSrtText 空行折叠、弹幕文本有换行折叠、NFO 全字段
+ * 转义，唯独章节漏了同款清洗。与 normalizeSrtText 同口径：去 \r、折叠连续空行。
+ */
+function cleanChapterText(s) {
+  return String(s ?? '')
+    .replace(/\r/g, '')
+    .replace(/\n{2,}/g, '\n');
+}
+// v1.4.29 数据一致性 F11：CHAPTER_TXT_NAME / CHAPTER_VTT_NAME 导出常量全库
+// 零引用（engine.fetchExtras 手工拼文件名），删除。

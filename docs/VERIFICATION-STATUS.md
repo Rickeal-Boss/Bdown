@@ -1,7 +1,35 @@
 # 修复验证状态台账
 
-**最新**：v1.4.21（2026-09-20）
+**最新**：v1.4.29（2026-09-23）。v1.4.21 台账见下方历史章节；v1.4.22–1.4.28 的
+版本级验证状态以 CHANGELOG 对应条目为准。
 **原则**：区分「已实测验证」「静态确认」「待测」三类。**不接受"改了就是已修"**。
+
+---
+
+## v1.4.29 六路审查轮的验证状态
+
+### 静态确认（CI/单测锁定）
+
+| 项 | 验证方式 | 结果 |
+|---|---|---|
+| 合集 spec 带 downloadMode | `selftest-core` [10] 源码断言（`currentMode()` ≥2 处） | ✅ |
+| startAll/pump 收尾统一 finishTracked | `selftest-core` [10]（≥3 处调用） | ✅ |
+| 课程（cheese）弹窗入口 | `selftest-core` [10]（cheeseSeason 分支存在）；**真实付费课程接口未验证** | ⚠️ 待真机 |
+| fetchTo 重试子路径 abort 收尾 | `selftest-core` [10]（abortExit ≥3 处）；`test-stall-rotation` 全绿 | ✅（真机暂停时序待测） |
+| 幽灵卡片守卫 / paused 指纹注册 | `selftest-core` [10] 源码断言 | ✅ |
+| 字幕白名单跳过 / 章节换行折叠 / Title 转义回归 | `selftest-core` [10] + `test-chapters` [6] + `test-danmaku` [9] | ✅ |
+| resumeKey cheeseId/trackId | `test-resume-store` [1b] | ✅ |
+| 设置枚举白名单 | `test-settings-enum.mjs`（新套件，已登记 validate.yml） | ✅ |
+| 焦点样式真实存在 | `selftest-core` [10]（common.css 含 `:focus-visible`）+ 键盘可达性（清晰度列表 tabindex/role） | ✅（Tab 走查待真机） |
+| 死代码 13 项删除（backlog 10 + 新发现 3） | 全库引用计数为 0（数据一致性预审）+ 28 套件全绿 | ✅ |
+
+### 待真机验证（v1.4.29 新增面）
+
+- 合集 + 「音视频分离」/「仅音频」组合（本轮 F-1 修复路径）
+- 课程链接进弹窗解析（付费内容需已购）
+- ask + 单文件 + 附加内容的 toast 提示与落盘位置
+- 键盘 Tab 走查三页面（焦点样式、清晰度列表 Enter/Space）
+- error 任务移除后「清理临时文件」对续传缓存的清理
 
 ---
 

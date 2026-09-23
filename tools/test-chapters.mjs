@@ -85,5 +85,18 @@ console.log('\n[5] 导出格式');
   ok('非数组输入不崩', chaptersToTxt(null) === '' && chaptersToVtt(undefined) === 'WEBVTT\n');
 }
 
+console.log('\n[6] 换行清洗（v1.4.29 安全审查 F-003：UP 主可控章节标题不得破坏导出结构）');
+{
+  const blank = [{ start: 0, end: 10, content: '第一段\n\n第二段' }];
+  const txt = chaptersToTxt(blank);
+  ok('txt：内容中的连续空行被折叠（条目不被切开）', !txt.includes('第一段\n\n第二段'), JSON.stringify(txt));
+  const crlf = [{ start: 0, end: 10, content: 'a\r\n\r\nb' }];
+  const vtt = chaptersToVtt(crlf);
+  ok('vtt：\\r 被去除', !vtt.includes('\r'), JSON.stringify(vtt));
+  ok('vtt：cue 文本里的空行被折叠（不会把一个 cue 切成两块）',
+    !vtt.includes('a\n\nb'), JSON.stringify(vtt));
+  ok('正常单行内容不受影响', chaptersToTxt([{ start: 0, end: 1, content: '开场' }]) === '0:00 开场\n');
+}
+
 console.log(`\n${fail === 0 ? '\u2705' : '\u274c'} 章节模块自检${fail === 0 ? '完成，失败 0 项' : `完成，失败 ${fail} 项`}（通过 ${pass}）\n`);
 process.exit(fail === 0 ? 0 : 1);

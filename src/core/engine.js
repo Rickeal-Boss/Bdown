@@ -188,8 +188,9 @@ export class DownloadEngine {
     this.workspace = new OpfsWorkspace('bdown-tmp');
     /** @type {Task[]} */
     this.tasks = [];
-    /** @type {Set<string>} */
-    this.running = new Set();
+    // v1.4.29 运行时 F4：this.running Set 此前只有 finally 里的 delete、全库无
+    // add —— 永远为空集的死代码。并发记账实际由 dashboard 的 runningCount 负责
+    // （引擎层如需并发上限再自行引入），删除以免误导。
   }
 
   updateSettings(settings) {
@@ -658,7 +659,6 @@ export class DownloadEngine {
         setStatus('error', task.error);
       }
     } finally {
-      this.running.delete(task.id);
       await this.cleanupTemps(tempNames);
     }
   }
@@ -733,9 +733,16 @@ export class DownloadEngine {
           aid: spec.aid,
           cid: spec.cid,
           epId: spec.epId,
+          // v1.4.29 数据一致性 F4：课程任务只有 cheeseId（无 bvid/aid/epId），
+          // 此前 key 派生为空 → prepareStage 落空 → 课程静默无续传
+          cheeseId: spec.cheeseId,
           quality: plan.quality,
           codec: plan.codec,
           track,
+          // v1.4.29 数据一致性 F5：同视频换音质偏好（如 30280↔30251）此前共用
+          // 同一个 key，仅靠 canResume 的 size 不等兜底 —— size 恰好相等时会把
+          // A 音轨的字节续进 B 音轨（静默坏文件）。把实际选中轨的 id 并进 key。
+          trackId: track === 'a' ? plan.audio?.id : plan.video?.id,
         });
         if (key) {
           // 记下 key，供「取消 / 成功」时清理（discardResume）。
@@ -944,6 +951,18 @@ export class DownloadEngine {
       await markTrackComplete(result?.size);
       return result;
     } catch (err) {
+      // ★ v1.4.29 运行时 F1：abort 的专用收尾出口。
+      //
+      //   修复前只有「首次 downloadRanged 抛 abort」这一条路会走到下面的
+      //   close+persist；若暂停/取消落在**两条重试子路径**（刷新地址重试 /
+      //   保留进度重试）执行期间，DownloadAborted 从内层 catch 抛出会绕过
+      //   收尾 —— sink 的 writable 不关、已完成的区间不落清单，
+      //   下次「继续」对同一 .part 再开一个 writable（两个 writable 并存，
+      //   写入互相覆盖）。三条出口现在统一经过 abortExit。
+      const abortExit = async () => {
+        await closeSinkQuietly(sink, '续传分片');
+        await persistProgress().catch(() => {});
+      };
       if (err instanceof DownloadAborted) {
         // ★ 用户取消 / 暂停：必须**先关掉 sink**再记清单、再抛。
         //
@@ -955,9 +974,7 @@ export class DownloadEngine {
         //      同一个 OPFS 文件两个 writable 并存 → 写入互相覆盖，或直接抛错。
         //
         // 先 close 再 persist，保证"落盘完成"发生在"记账"之前。
-        await closeSinkQuietly(sink, '续传分片');
-        // 保留清单，下次可续（取消会在 run() 的 catch 里再把它清掉）
-        await persistProgress().catch(() => {});
+        await abortExit();
         throw err;
       }
       // B 站 CDN 地址约 120 分钟失效，失效后返回 403 / 404。
@@ -992,6 +1009,13 @@ export class DownloadEngine {
             return retried;
           }
         } catch (e2) {
+          // v1.4.29 运行时 F1：暂停/取消落在刷新重试期间时，此前这里把 abort
+          // 当普通失败吞掉，掉进底部的「回退顺序下载」（signal 已 abort，立即
+          // 再抛），同样绕过收尾。统一走 abortExit。
+          if (e2 instanceof DownloadAborted) {
+            await abortExit();
+            throw e2;
+          }
           warn('刷新播放地址后重试仍失败', e2?.message);
           err = e2;
         }
@@ -1025,13 +1049,23 @@ export class DownloadEngine {
             await markTrackComplete(kept?.size);
             return kept;
           } catch (e2) {
-            if (e2 instanceof DownloadAborted) throw e2;
+            if (e2 instanceof DownloadAborted) {
+              // v1.4.29 运行时 F1：此前这里直接 throw，绕过 sink 关闭与清单落盘
+              await abortExit();
+              throw e2;
+            }
             warn('保留进度重试仍失败，才回退到顺序下载', e2?.message);
             err = e2;
           }
         }
       }
 
+      // v1.4.29 运行时 F1：刷新重试子路径落进来的 abort（err = e2 instanceof
+      // DownloadAborted）不能掉进「回退顺序下载」—— 先收尾再抛
+      if (err instanceof DownloadAborted) {
+        await abortExit();
+        throw err;
+      }
       warn('分片下载失败，回退到顺序下载', err.message);
       await resetSink(sink);
       // 回退顺序下载时不能续传（会重下整个文件），清掉清单避免半份残留
@@ -1148,33 +1182,41 @@ export class DownloadEngine {
         const subs = info?.subtitle?.subtitles || [];
         const target = pickSubtitle(subs, settings.subtitleLan);
           if (target?.subtitle_url) {
-            // ★ 字幕 URL 来自接口数据，必须过白名单再决定要不要带凭证。
+            // ★ 字幕 URL 来自接口数据，必须过白名单再决定要不要请求。
             // 旧实现直接 `fetch(url, { credentials: 'include' })`，既没校验域名
             // （可对任意可控 URL 发带 Cookie 请求），也没强制 https
             // （`http://` 会明文带凭证）。见 util.sanitizeBiliUrl。
             const { url, safe, reason } = sanitizeBiliUrl(target.subtitle_url);
             if (!url) throw new Error(`字幕地址无效：${reason || '未知原因'}`);
-            if (!safe) warn('字幕地址不在 B 站域名白名单内，已改为不带凭证请求', reason);
-            const res = await fetch(url, { credentials: safe ? 'include' : 'omit' });
-          const json = await res.json();
-          const parsed = parseSubtitleJson(json, { lan: target.lan, lanDoc: target.lan_doc });
-          const format = settings.subtitleFormat || 'srt';
-          if (format === 'ass') {
-            await put(
-              `${task.filename}.${target.lan}.ass`,
-              subtitleToAss(parsed, {
-                title: task.title,
-                width: settings.danmakuWidth,
-                height: settings.danmakuHeight,
-              })
-            );
-          } else if (format === 'txt') {
-            await put(`${task.filename}.${target.lan}.txt`, subtitleToText(parsed));
-          } else {
-            await put(`${task.filename}.${target.lan}.srt`, subtitleToSrt(parsed), 'application/x-subrip');
+            // ★ v1.4.29 安全审查 F-001：非白名单地址此前仍会 fetch（只是降级为
+            //   不带凭证）—— 与封面（safeMediaUrl 不过关直接跳过）处置不一致，
+            //   且仍会向任意 https 域送出请求，泄露真实 IP 与扩展 Origin。
+            //   字幕 URL 正常由 B 站服务端生成，不在白名单即视为异常数据，
+            //   直接跳过该字幕（下载主流程不受影响）。
+            if (!safe) {
+              warn('字幕地址不在 B 站域名白名单内，已跳过该字幕', reason);
+            } else {
+              const res = await fetch(url, { credentials: 'include' });
+              const json = await res.json();
+              const parsed = parseSubtitleJson(json, { lan: target.lan, lanDoc: target.lan_doc });
+              const format = settings.subtitleFormat || 'srt';
+              if (format === 'ass') {
+                await put(
+                  `${task.filename}.${target.lan}.ass`,
+                  subtitleToAss(parsed, {
+                    title: task.title,
+                    width: settings.danmakuWidth,
+                    height: settings.danmakuHeight,
+                  })
+                );
+              } else if (format === 'txt') {
+                await put(`${task.filename}.${target.lan}.txt`, subtitleToText(parsed));
+              } else {
+                await put(`${task.filename}.${target.lan}.srt`, subtitleToSrt(parsed), 'application/x-subrip');
+              }
+              log('字幕已保存', target.lan, parsed.items.length);
+            }
           }
-          log('字幕已保存', target.lan, parsed.items.length);
-        }
       } catch (err) {
         warn('字幕获取失败', err);
       }
@@ -1638,5 +1680,5 @@ export function resolveFilename({ spec, settings, plan }) {
     codec: plan?.codec,
   });
 }
-
-export { qualityShort };
+// v1.4.29 数据一致性 F11：`export { qualityShort }` 再导出全库零引用（消费方
+// 都直接 import quality.js），删除。文件内的 import 保留 —— 上方仍在使用。

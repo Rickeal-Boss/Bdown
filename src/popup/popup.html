@@ -112,6 +112,9 @@
           <label class="bd-switch"><input type="checkbox" id="optSubtitle" /><span>字幕</span></label>
           <label class="bd-switch"><input type="checkbox" id="optCover" /><span>封面</span></label>
         </div>
+        <!-- v1.4.29 产品审查 F-7：这些开关会写回全局设置（与上方「本次生效」的
+             下载方式语义不同），必须明示，否则用户以为只是临时勾选 -->
+        <div class="bd-hint" style="margin-top:6px">勾选会记住为默认偏好（设置页可改）</div>
       </div>
 
       <div id="summary" class="summary"></div>

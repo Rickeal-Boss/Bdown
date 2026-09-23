@@ -93,6 +93,11 @@ jobs:
       - name: 字幕模块自检（ASS 转义 / SRT 块结构 / 语言挑选）
         run: node tools/test-subtitle.mjs
 
+      # v1.4.29（数据一致性 F8）：枚举字段此前无任何校验，storage 存了非法值
+      # 会原样下发到各消费点 —— 白名单校验收口在 loadSettings 一处，这里锁死。
+      - name: 设置枚举白名单自检（非法值回落默认）
+        run: node tools/test-settings-enum.mjs
+
       - name: NFO 元数据自检（XML 转义 / movie+episode+tvshow 三形态）
         run: node tools/test-nfo.mjs
 

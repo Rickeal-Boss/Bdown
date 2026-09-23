@@ -8,7 +8,7 @@
  *       7 高级弹幕、8 代码弹幕、9 BAS 弹幕。
  */
 
-import { toAssTime, toSrtTime, sanitizeFilename, escapeAssText } from './util.js';
+import { toAssTime, toSrtTime, escapeAssText } from './util.js';
 
 /** 字号换算基准：B 站播放器把 25 号字渲染在约 480px 高的画布上。 */
 const FONT_BASE_HEIGHT = 480;
@@ -270,9 +270,8 @@ export function filterDanmaku(list, { maxLength = 0, blockWords = [], dedupe = f
   });
 }
 
-export function danmakuFilename(base, ext) {
-  return `${sanitizeFilename(base)}.${ext}`;
-}
+// v1.4.29 死代码清理：danmakuFilename 全库零引用（engine.fetchExtras 手工拼名），
+// 删除。需要时从 git 历史找回。
 
 /**
  * @typedef {object} DanmakuItem

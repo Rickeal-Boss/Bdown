@@ -39,50 +39,15 @@ export const AUDIO_QUALITIES = {
   30300: { label: 'Hi-Res 无损', desc: 'FLAC', special: true },
 };
 
-export function qualityLabel(id) {
-  return QUALITIES[id]?.label || String(id);
-}
-
 export function qualityShort(id) {
   return QUALITIES[id]?.short || String(id);
 }
 
-export function codecName(codecid) {
-  return CODECS[codecid]?.name || `codecid-${codecid}`;
-}
-
-export function audioLabel(id) {
-  return AUDIO_QUALITIES[id]?.label || String(id);
-}
-
-export function isVipQuality(id) {
-  return !!QUALITIES[id]?.vip;
-}
-
-export function isLoginQuality(id) {
-  return !!QUALITIES[id]?.login;
-}
-
-/** 根据 support_formats 推断「缺少哪些清晰度」的提示。 */
-export function describeMissing(acceptQuality, supportFormats) {
-  const accepted = new Set(acceptQuality || []);
-  const missing = (supportFormats || [])
-    .filter((f) => !accepted.has(f.quality))
-    .map((f) => QUALITIES[f.quality]?.label || f.new_description || f.display_desc || f.quality);
-  return missing;
-}
-
-/**
- * 编码优先级（默认 AVC 优先，兼容性最好）。
- * @param {number} codecid
- * @param {'avc'|'hevc'|'av1'} prefer
+/*
+ * v1.4.29 死代码清理（数据一致性预审：全库引用计数为 0，删除安全等级 A）：
+ * 以下 7 个导出自上线起零引用 —— qualityLabel / codecName / audioLabel /
+ * isVipQuality / isLoginQuality / describeMissing / codecScore。
+ * 消费方只用到 QUALITIES / CODECS / AUDIO_QUALITIES 三张表与 qualityShort
+ * （弹窗自查 QUALITIES[q].vip，api.js 自算 codec 名与优先级）。
+ * 若日后需要其中某个，从 git 历史找回即可。
  */
-export function codecScore(codecid, prefer = 'avc') {
-  const order = {
-    avc: [7, 12, 13],
-    hevc: [12, 7, 13],
-    av1: [13, 12, 7],
-  }[prefer] || [7, 12, 13];
-  const idx = order.indexOf(codecid);
-  return idx < 0 ? 99 : idx;
-}
