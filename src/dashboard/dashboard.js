@@ -6,12 +6,13 @@
  * 直接写入用户选定的文件，天然支持 GB 级文件。
  */
 
-import { DownloadEngine, Task } from '../core/engine.js';
+import { DownloadEngine, Task, SpecKeyRegistry } from '../core/engine.js';
+import { createTaskFinisher } from '../core/lifecycle.js';
 import { BiliApi } from '../core/api.js';
 import { loadSettings, saveSettings, onSettingsChanged, savePickerHint } from '../core/settings.js';
 import { OpfsWorkspace } from '../core/sink.js';
 import { qualityShort } from '../core/quality.js';
-import { formatBytes, formatSpeed, formatEta, log } from '../core/util.js';
+import { formatBytes, formatSpeed, formatEta, log, warn } from '../core/util.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -71,6 +72,13 @@ function ensureNode(task) {
     // 重新入队：保留 spec，重置状态
     task.controller = new AbortController();
     task.status = 'pending';
+    // ★ v1.4.30（运行时 F4 缺口 B）：重试必须**重新占住**防重指纹。
+    //   进入终态时 finishTracked 已经把它释放了；不重新 claim 的话，重试在飞期间
+    //   用户再派发同一视频会被 acceptPending 放行 → 两个同内容任务并发
+    //   （续传开启时两个任务写同一个 .part/.json，正是要杜绝的坏文件场景）。
+    //   claim 会复用 task.specKey —— 重试期间 spec 已被 ensureSpecComplete 改写过，
+    //   按当前 spec 重算会得到另一把键，那就等于没占住。
+    try { specRegistry.claim(task); } catch { /* ignore */ }
     task.error = '';
     task.progress = 0;
     task.downloadedBytes = 0;
@@ -288,72 +296,72 @@ async function pickDestination(taskCount, task = null) {
  */
 async function prunePendingTask(task) {
   try {
-    const { pendingTasks = [] } = await chrome.storage.local.get('pendingTasks');
-    if (!pendingTasks.length) return;
     const spec = task.spec || task;
     const cid = Number(spec.cid || 0);
-    const page = Number(spec.pageIndex || 0);
-    const next = pendingTasks.filter((s) => {
-      if (!s || typeof s !== 'object') return false;
-      const sameCid = cid > 0 && Number(s.cid || 0) === cid;
-      const sameBvid = spec.bvid && s.bvid === spec.bvid;
-      if (!sameCid && !sameBvid) return true;      // 不相关，保留
-      return Number(s.pageIndex || 0) !== page;    // 相关且同 P -> 移除
-    });
-    if (next.length !== pendingTasks.length) {
-      await chrome.storage.local.set({ pendingTasks: next });
-    }
+    const bvid = spec.bvid || '';
+    const pageIndex = Number(spec.pageIndex || 0);
+    if (!cid && !bvid) return;
+    // ★ v1.4.30（数据一致性 F1）：删除也交给 SW 的**串行链**执行。
+    //
+    //   原实现是 dashboard 自己 `get → filter → set`，与 SW 的 appendPendingTasks
+    //   并发时会把「刚追加进来的条目」连同旧快照一起写回去（新任务丢失），
+    //   或者把已消费的条目复活。现在 pendingTasks 的全部读改写都在 SW 里串行。
+    await chrome.runtime.sendMessage({ type: 'PRUNE_PENDING', payload: { cid, bvid, pageIndex } });
   } catch {
     /* 清理失败不影响主流程 */
   }
 }
 
 /**
- * 任务收尾（v1.4.29 产品审查 F-2）：计数 / 持久化 / 清 pendingTasks / 释放指纹 / 泵。
+ * 任务收尾：计数 / 持久化 / 清 pendingTasks / 释放指纹 / 完成通知 / 队列泵。
  *
- * ★ startAll 与 pump 的 finally 此前各自复制了其中一半（漏掉 prunePendingTask
- *   和 releaseSpecKey），后果：
- *   ① 「全部开始」/ downloads 泵跑完的任务不释放指纹 → 同会话内再下载同一视频
- *      被 acceptPending 静默吞掉（连 toast 都没有）；
- *   ② storage 里的 pendingTasks 条目不清理。
- *   runTracked 注释里"复制三份必漏一份"的教训再次应验 —— 三条路径现在共用本函数。
+ * ★ v1.4.30：编排本身搬到 `core/lifecycle.js`（依赖注入），这里只把真实的副作用接上去。
+ *   原因见 lifecycle.js 顶部 —— 这段代码住在 dashboard.js 里时**在 CI 里 import 不了**
+ *   （顶层依赖 document），因此零行为覆盖：变异测试把 `registry.release(task)` 或
+ *   `await prunePending(task)` 整行删掉，33 个套件依旧全绿。而它正是 v1.4.29
+ *   刚修过的「复制三份必漏一份」（startAll / pump / runTracked 各自复制收尾）。
+ *   收尾现在由 tools/test-lifecycle.mjs 直接断言，不靠 grep 计数。
  *
  * @param {object} task 已到终态的任务
  * @param {{ notify?: boolean }} [opts] runTracked 路径需要完成通知（toast + 徽章）
  */
-async function finishTracked(task, { notify = false } = {}) {
-  runningCount -= 1;
-  updateCounts();
-  persistHistory();
-  // 任务已到终态（done / error / canceled）：把 chrome.storage 里对应的
-  // pendingTasks 条目清掉。否则用户取消后关掉下载中心再打开，
-  // 那个已取消的任务会被重新入队（用户以为自己取消成功了）。
-  await prunePendingTask(task);
-  // 释放指纹：允许同一会话内再次下载这个视频（例如换个清晰度重下）。
-  // ★ paused **不释放** —— 它还留在列表里等着被「继续」，此时若放行同名派发
-  //   会建出第二个同内容任务，继续时两路写同一个 .part，文件必坏。
-  if (task.status !== 'paused') releaseSpecKey(task);
-  if (notify && task.status === 'done' && settings.notifyOnComplete) {
-    showToast(`已完成：${task.filename || task.title}`);
-    // 下载中心在**后台标签页**时，页面内的 toast 用户根本看不到。
-    //
-    // 这里用扩展图标徽章补上：chrome.action.setBadgeText **不需要 notifications 权限**
-    // （声明了 action 即可用），因此不会给安装流程增加权限警告 ——
-    // 项目此前刻意移除过 notifications 权限（见 PRIVACY.md）。
-    // 页面重新可见时徽章会被清掉（见下方 visibilitychange）。
-    if (document.hidden) {
-      // 注意 `a?.b?.().catch?.()` 这种写法**并不安全**：若方法存在但返回 undefined
-      // （MV2 风格回调式 API 就是这样），`undefined.catch` 会直接抛 TypeError。
-      // 可选链只短路 `?.` 左侧，保护不了后面的属性访问。改用 try/catch。
-      try {
-        const p = chrome.action?.setBadgeBackgroundColor?.({ color: '#2ecc71' });
-        if (p && typeof p.catch === 'function') p.catch(() => {});
-        const q = chrome.action?.setBadgeText?.({ text: '✓' });
-        if (q && typeof q.catch === 'function') q.catch(() => {});
-      } catch { /* 徽章不可用不影响下载本身 */ }
-    }
-  }
-  pump();
+const finishTracked = createTaskFinisher({
+  onSettled: () => {
+    runningCount -= 1;
+    updateCounts();
+  },
+  persistHistory: () => persistHistory(),
+  prunePending: (task) => prunePendingTask(task),
+  registry: specRegistry,
+  notifyDone: (task) => notifyTaskDone(task),
+  pump: () => pump(),
+  // 收尾链单步失败要留下日志：这些失败是静默的（例如 storage 配额满导致
+  // pendingTasks 清不掉），不记下来就再也追不到。
+  onError: (step, err) => log('任务收尾步骤失败', step, err?.message || err),
+});
+
+/**
+ * 完成通知：页面内 toast + 后台标签页时的扩展图标徽章。
+ *
+ * 下载中心在**后台标签页**时，页面内的 toast 用户根本看不到，所以用图标徽章补上：
+ * `chrome.action.setBadgeText` **不需要 notifications 权限**（声明了 action 即可用），
+ * 因此不会给安装流程增加权限警告 —— 项目此前刻意移除过 notifications 权限（见 PRIVACY.md）。
+ * 页面重新可见时徽章会被清掉（见 init 里的 visibilitychange）。
+ */
+function notifyTaskDone(task) {
+  // 「完成通知」是用户可关的偏好
+  if (!settings?.notifyOnComplete) return;
+  showToast(`已完成：${task.filename || task.title}`);
+  if (!document.hidden) return;
+  // 注意 `a?.b?.().catch?.()` 这种写法**并不安全**：若方法存在但返回 undefined
+  // （MV2 风格回调式 API 就是这样），`undefined.catch` 会直接抛 TypeError。
+  // 可选链只短路 `?.` 左侧，保护不了后面的属性访问。改用 try/catch。
+  try {
+    const p = chrome.action?.setBadgeBackgroundColor?.({ color: '#2ecc71' });
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+    const q = chrome.action?.setBadgeText?.({ text: '✓' });
+    if (q && typeof q.catch === 'function') q.catch(() => {});
+  } catch { /* 徽章不可用不影响下载本身 */ }
 }
 
 /**
@@ -560,6 +568,16 @@ async function startAll() {
 
   for (const task of pending) {
     if (task.status !== 'pending') continue;
+    // ★ v1.4.30（运行时 F1）：**必须在第一个 await 之前就把状态移出 `pending`**。
+    //
+    //   `engine.run()` 的第一个 await（ensureSpecComplete 的网络往返）之前不会改
+    //   status，而 `pump()`（由 finishTracked 在别的任务结束时调用）恰好用
+    //   `status === 'pending'` 挑下一个任务 —— 两者会选中**同一个**任务：
+    //   同一个任务被 run 两次（重复下载 / 产物翻倍 / 突破 maxParallelTasks；
+    //   续传开启时两个 run 写同一个 .part）。
+    //   实测（运行时排障手 rt-pump-double-start）：5 个 pending / max=2 时
+    //   t3/t4/t5 各被 run 两次。双击「全部开始」也走同一条路径。
+    task.status = 'resolving';
     task.lastDestination = destination;
     runningCount += 1;
     engine
@@ -584,6 +602,9 @@ function pump() {
   if (runningCount >= max) return;
   const next = engine.tasks.find((t) => t.status === 'pending');
   if (!next) return;
+  // ★ v1.4.30（运行时 F1）：与 startAll 同因 —— 先占位再 await。
+  //   否则 startAll 的 pending 快照与本泵会各自启动同一个任务。
+  next.status = 'resolving';
   next.lastDestination = { kind: 'downloads' };
   runningCount += 1;
   engine
@@ -606,26 +627,24 @@ async function persistHistory() {
 }
 
 /**
- * 本会话已消费过的任务指纹集合。
+ * 本会话已消费过的任务指纹表（防重复派发）。
  *
  * 为什么需要：`storage.onChanged` 的每个事件都携带**该次写入瞬间**的 `newValue` 快照。
  * 两次快速派发时（write1=[A]、write2=[A,B]）会触发两个事件，各自按自己的
  * newValue 建任务 → **任务 A 被创建两次 → 同一个视频重复下载两份**。
+ *
+ * ★ v1.4.30（P1）：实现从裸 `Set<string>` 换成 engine 的 `SpecKeyRegistry`。
+ *   旧实现「注册时用原始 spec 算键、释放时用**被 ensureSpecComplete 原地改写过**的
+ *   spec 再算一次键」，两把键永远不等 → 指纹永不释放 → 从内容脚本悬浮按钮 /
+ *   播放器按钮 / 右键菜单（这些 spec **没有 cid**）下载过的视频，在**同一次会话内**
+ *   再也派发不出去 —— 静默吞掉，连 toast 都没有。
+ *   注册表把键记在 task 上，释放时删的就是当初占的那把键。
+ *
+ * ⚠️ 指纹函数 `specKey()` 现在住在 engine.js，与 `ensureSpecComplete` **同模块** ——
+ *   定义「任务身份」的代码必须和**改写**身份的代码放在一起，否则
+ *   「注册键 ≠ 释放键」会被下一次重构再次引入（v1.4.30 这条 P1 正是它）。
  */
-const consumedSpecKeys = new Set();
-
-/** 任务的稳定指纹：同一视频 + 同一分P + 同一清晰度视为同一个任务。 */
-function specKey(spec) {
-  return [
-    spec?.bvid || '',
-    spec?.aid || '',
-    spec?.cid || '',
-    spec?.epId || '',
-    spec?.cheeseId || '',
-    spec?.pageIndex ?? 0,
-    spec?.quality ?? 0,
-  ].join('|');
-}
+const specRegistry = new SpecKeyRegistry();
 
 /**
  * 原子地「读 → 删 → 去重 → 建任务」一批待处理任务。
@@ -635,20 +654,35 @@ function specKey(spec) {
  * 再用指纹去重，保证同一任务只被建一次。
  */
 async function acceptPending(isIncremental = false) {
-  const { pendingTasks = [] } = await chrome.storage.local.get('pendingTasks');
+  // ★ v1.4.30（数据一致性 F1）：**消费动作交给 service worker 执行**。
+  //
+  //   原实现是「dashboard `get` → `remove('pendingTasks')`」。`remove` 是**整体删键**，
+  //   与 SW 的 appendPendingTasks（`get` → `set [existing, ...tasks]`）并发时会互相吃掉：
+  //     SW: get → [A] │ dashboard: get → [A] │ SW: set [A,B] │ dashboard: remove
+  //     → 用户刚点的那一票（B）被删掉，**任务凭空消失**，UI 上什么都不出现。
+  //   反过来的交错则会把已消费的 A 写回 storage → 重开下载中心后重复下载。
+  //   现在两侧的读改写都挂在 SW 里同一条 Promise 链上，跨上下文竞态被消除。
+  let pendingTasks = [];
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'CONSUME_PENDING' });
+    pendingTasks = Array.isArray(res?.tasks) ? res.tasks : [];
+  } catch (err) {
+    warn('消费待处理任务失败', err?.message);
+    return 0;
+  }
   if (!pendingTasks.length) return 0;
-  await chrome.storage.local.remove('pendingTasks');
 
   let added = 0;
   for (const spec of pendingTasks) {
-    const key = specKey(spec);
-    if (consumedSpecKeys.has(key)) continue;
-    consumedSpecKeys.add(key);
+    if (!spec || typeof spec !== 'object') continue;
+    if (specRegistry.has(spec)) continue;
     const task = engine.addTask(spec, {
       title: spec.title || spec.info?.title || spec.bvid || '视频任务',
       filename: spec.filename || '',
       subtitle: spec.qualityShort || '',
     });
+    // ★ 占位必须紧跟在建任务之后：键记在 task 上，释放时才能删对
+    specRegistry.claim(task);
     renderTask(task);
     added += 1;
   }
@@ -662,13 +696,17 @@ async function acceptPending(isIncremental = false) {
 /**
  * 释放一个任务占用的指纹，允许它**再次**被派发。
  *
- * 为什么必须释放：`consumedSpecKeys` 若只增不减，同一会话内第二次下载同一个视频
+ * 为什么必须释放：指纹若只增不减，同一会话内第二次下载同一个视频
  * （比如下完发现选错清晰度、想换个档重下）会被**静默丢弃** —— UI 上什么都不出现，
  * 用户以为扩展坏了（v1.4.22 引入该去重时遗漏，随即修复）。
  * 任务进入终态（done / error / canceled）或被清除时调用。
+ *
+ * ★ v1.4.30：改为委托 `specRegistry.release(task)` —— 删的是 `claim()` 时
+ *   **记在 task 上**的那把键，而不是按当前（已被 ensureSpecComplete 改写过的）spec
+ *   重算。重算正是「注册键 ≠ 释放键」的根源。
  */
 function releaseSpecKey(task) {
-  try { consumedSpecKeys.delete(specKey(task?.spec || {})); } catch { /* ignore */ }
+  try { specRegistry.release(task); } catch { /* ignore */ }
 }
 
 async function loadPendingTasks() {
@@ -703,7 +741,13 @@ async function loadPendingTasks() {
       // resumeKey 的 .part/.json（正是 fetchTo 注释里"同一 OPFS 文件两个
       // writable 并存"的坏文件场景）。会话内 paused 不释放指纹（见
       // finishTracked），恢复时也要把它占住。
-      try { consumedSpecKeys.add(specKey(task.spec || {})); } catch { /* ignore */ }
+      //
+      // ★ v1.4.30：注册键必须与 fresh 派发的键**同形**。`rec.spec` 是
+      //   `ensureSpecComplete` 之后持久化的（**带 cid**），而 fresh 派发时
+      //   注册用的是**没有 cid** 的原始 spec —— 旧 specKey 含 cid，两者于是不同，
+      //   这条 v1.4.29 的修复在「恢复 ↔ 同视频重新派发」上实际失效。
+      //   现在 specKey 不含 cid，两侧同形。
+      try { specRegistry.claim(task); } catch { /* ignore */ }
     }
       engine.tasks.push(task);
       renderTask(task);
@@ -756,19 +800,31 @@ async function init() {
 
   $('btnOptions').addEventListener('click', () => chrome.runtime.openOptionsPage());
   $('btnClean').addEventListener('click', async () => {
+    // ★ v1.4.30（数据一致性 F3）：**先判定、再清理**，并且把 `error` 算作活跃。
+    //
+    //   原实现是「无条件 await engine.cleanupAll() → 之后才判 hasLive」，两处问题：
+    //     ① `engine.cleanupAll()` 清的是 OPFS 的 `bdown-tmp` —— 那正是**在途大文件**
+    //        的暂存目标（createOutput 按 shouldUseMemory 分流，只有大文件走 OPFS）。
+    //        有下载在跑时点这个按钮，会把正在写的临时产物删掉。
+    //     ② `hasLive` 的清单里**没有 `error`** —— 而 error 任务的 .part/.json 是
+    //        刻意保留给「重试」的（resume-store 的注释与 test-resume-store 断言都在
+    //        维护这个语义）。漏掉它之后，只要列表里有一个失败待重试的任务，
+    //        这次点击就会把它唯一能续传的清单一起清掉，重试退化成从 0 重下。
+    let extra = '';
+    const hasLive = engine.tasks.some((t) =>
+      ['downloading', 'paused', 'resolving', 'muxing', 'saving', 'error'].includes(t.status));
+    if (hasLive) {
+      showToast('有进行中或待重试的任务，已跳过临时文件清理');
+      return;
+    }
     await engine.cleanupAll();
     // v1.4.29 数据一致性 F2：「清理临时文件」此前只清 bdown-tmp，碰不到
     // bdown-resume —— error/被遗忘的续传 .part 永久占空间。没有进行中/
     // 暂停任务时一并清掉续传缓存（有则跳过，避免破坏在用的续传数据）。
-    let extra = '';
-    const hasLive = engine.tasks.some((t) =>
-      ['downloading', 'paused', 'resolving', 'muxing', 'saving'].includes(t.status));
-    if (!hasLive) {
-      try {
-        await new OpfsWorkspace('bdown-resume').clear();
-        extra = '，续传缓存已清';
-      } catch { /* 清不掉不影响主流程 */ }
-    }
+    try {
+      await new OpfsWorkspace('bdown-resume').clear();
+      extra = '，续传缓存已清';
+    } catch { /* 清不掉不影响主流程 */ }
     await refreshStorageBadge();
     showToast(`临时文件已清理${extra}`);
   });

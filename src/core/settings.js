@@ -67,8 +67,46 @@ export const DEFAULT_SETTINGS = {
 
 const KEYS = Object.keys(DEFAULT_SETTINGS);
 
-/** DEFAULT_SETTINGS 里类型是 number 的字段名（用于读取时做归一化）。 */
-const NUMERIC_KEYS = KEYS.filter((k) => typeof DEFAULT_SETTINGS[k] === 'number');
+/**
+ * 数字型设置的**合法区间**（v1.4.30 加固）。
+ *
+ * 为什么必须钳制而不是只做 `Number()`：
+ *   storage 里的值可能被写坏（手改 / 旧版本字段淘汰 / 同步冲突 / 别处 bug）。
+ *   实测 `concurrency: "NaN"` 时下游 `Math.max(1, Math.min(16, this.settings.concurrency || 8))`
+ *   会得到 NaN（`"NaN" || 8` 是非空串 truthy → "NaN" → Math.min 得 NaN → Math.max 得 NaN），
+ *   于是分片 worker 循环 **0 次**，任务却标记 done —— 静默产出 0 字节文件。
+ *   负数 / 0 / 超上限同理会把并发、重试、画布尺寸等推到非法状态。
+ *
+ * 取值策略（钳制 vs 回落默认）：
+ *   - **非有限数**（NaN / Infinity / 非数字字符串）→ 回落 `DEFAULT_SETTINGS`：
+ *     这类值无法表达任何"意图"，默认值最安全。
+ *   - **有限但越界**（0 / 负数 / 超上限）→ **钳到最近边界**，而不是回落默认：
+ *     越界值表达了明确的"方向性意图"（想更大 / 想更小），钳制比丢弃更贴近用户本意，
+ *     也避免"我设了 999 怎么变回 8"的困惑。
+ *   - `''` / `null` / `undefined` 视为"未设置" → 回落默认。
+ *
+ * 区间来源：options.html 的 min/max 提示、engine/downloader 的实际消费上限。
+ */
+const NUMERIC_RANGES = {
+  defaultQuality: [0, 127], // B 站 qn 上限 127（8K）；0 = 自动
+  concurrency: [1, 16], // engine.js: Math.max(1, Math.min(16, ...))
+  retries: [0, 5], // 0 是合法值（不重试）
+  danmakuOpacity: [0.1, 1],
+  danmakuFontScale: [0.5, 2],
+  danmakuWidth: [16, 16384],
+  danmakuHeight: [16, 16384],
+  maxParallelTasks: [1, 8],
+};
+
+/**
+ * 布尔型设置：只有**字面 `true`** 才算开启。
+ *
+ * 为什么不能 `!!v`：storage 里存成字符串 `"false"`（非空串）或数字 `0` 时，
+ * `!!v` 会把它当 truthy —— `notifyOnComplete: "false"` 反而开启了通知。
+ * 严格 `=== true` 让"非真即假"，与 `lib.dom` 里 checkbox 的 `.checked` 语义一致。
+ * 所有写入方（options/popup/dashboard/service-worker）写的都是真布尔，不会误伤。
+ */
+const BOOLEAN_KEYS = KEYS.filter((k) => typeof DEFAULT_SETTINGS[k] === 'boolean');
 
 /**
  * 枚举字段的合法值域（v1.4.29 数据一致性 F8）。
@@ -99,11 +137,23 @@ export async function loadSettings() {
   //   - 所以 `if (!quality)` 不会把字符串 "0" 识别为"自动"
   //   - 直接走到降级分支，accept 最小档（360P）就成了默认结果
   // 统一 Number()，让所有下游逻辑（buildPlan 等）拿到的都是数字。
-  for (const k of NUMERIC_KEYS) {
-    if (merged[k] !== undefined && merged[k] !== null && merged[k] !== '') {
-      const n = Number(merged[k]);
-      if (Number.isFinite(n)) merged[k] = n;
+  // v1.4.30：在 Number() 之外补「有限性 + 区间钳制」——见 NUMERIC_RANGES 注释。
+  for (const [k, [lo, hi]] of Object.entries(NUMERIC_RANGES)) {
+    const raw = merged[k];
+    if (raw === undefined || raw === null || raw === '') {
+      merged[k] = DEFAULT_SETTINGS[k];
+      continue;
     }
+    const n = Number(raw);
+    if (!Number.isFinite(n)) {
+      merged[k] = DEFAULT_SETTINGS[k];
+      continue;
+    }
+    merged[k] = Math.min(hi, Math.max(lo, n));
+  }
+  // 布尔字段强制为真布尔（非字面 true 一律 false）—— 见 BOOLEAN_KEYS 注释。
+  for (const k of BOOLEAN_KEYS) {
+    merged[k] = merged[k] === true;
   }
   // 枚举字段白名单校验：storage 被写坏（手改/旧版本字段淘汰/同步冲突）时
   // 回落默认值，而不是把非法值透传给下游

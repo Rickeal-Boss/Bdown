@@ -41,7 +41,12 @@ function parseVideoFromUrl(rawUrl) {
     const cep = url.pathname.match(/\/cheese\/play\/ep(\d+)/i);
     if (cep) return { cheeseId: Number(cep[1]), pageIndex: 0 };
     const css = url.pathname.match(/\/cheese\/play\/ss(\d+)/i);
-    if (css) return { cheeseSeasonId: Number(css[1]), pageIndex: 0 };
+    // ★ v1.4.30：这里以前返回 `{ cheeseSeasonId }` —— 全库**只有这一处**产出该字段，
+    //   而 util.extractVideoId、engine.ensureSpecComplete、api.playurl 全都不认它，
+    //   于是 /cheese/play/ss<id> 页面上点下载必定报「任务缺少 cid」。
+    //   统一归一成 cheeseId（与 util.js 的 cheeseSs 分支一致），
+    //   具体取哪一集由 ensureSpecComplete 兜底取第一集。
+    if (css) return { cheeseId: Number(css[1]), pageIndex: 0 };
     if (url.pathname.startsWith('/list/')) {
       const mid = url.searchParams.get('mid');
       if (mid) return { mid: Number(mid), pageIndex: 0, isSpace: true };
@@ -69,9 +74,14 @@ function ensureFloatButton() {
   }
   if (floatButton && document.body.contains(floatButton)) return;
 
-  floatButton = document.createElement('div');
+  // v1.4.30 无障碍：原为 <div onclick>，无法被 Tab 聚焦、也不响应 Enter/Space。
+  // 改成 <button type="button"> —— 键盘 Enter/Space 会原生派发 click，
+  // 无需再手写 keydown；可见焦点环见 content.css 的 :focus-visible。
+  floatButton = document.createElement('button');
+  floatButton.type = 'button';
   floatButton.className = 'bdown-float';
   floatButton.title = 'Bdown：解析并下载此视频';
+  floatButton.setAttribute('aria-label', 'Bdown：解析并下载此视频');
   floatButton.innerHTML = `
     <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
       <path fill="currentColor" d="M12 3a1 1 0 0 1 1 1v8.6l2.3-2.3a1 1 0 1 1 1.4 1.4l-4 4a1 1 0 0 1-1.4 0l-4-4a1 1 0 1 1 1.4-1.4L11 12.6V4a1 1 0 0 1 1-1ZM5 18a1 1 0 0 1 1 1h12a1 1 0 1 1 0 2H6a1 1 0 0 1-1-1Z"/>
@@ -106,9 +116,14 @@ function ensurePlayerButton() {
   const container = containers.map((s) => document.querySelector(s)).find(Boolean);
   if (!container) return;
 
-  playerButton = document.createElement('div');
+  // v1.4.30 无障碍：同样由 <div> 改为 <button type="button">（键盘可达）。
+  // 该按钮被塞进 B 站播放器控制栏，故仍保留 bpx-* 类名以沿用其布局；
+  // content.css 里已补 border/padding/background 复位，避免 UA 按钮样式干扰。
+  playerButton = document.createElement('button');
+  playerButton.type = 'button';
   playerButton.className = 'bdown-player-btn bpx-player-ctrl-btn';
   playerButton.title = 'Bdown：下载此视频';
+  playerButton.setAttribute('aria-label', 'Bdown：下载此视频');
   playerButton.innerHTML = `
     <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
       <path fill="currentColor" d="M12 3a1 1 0 0 1 1 1v8.6l2.3-2.3a1 1 0 1 1 1.4 1.4l-4 4a1 1 0 0 1-1.4 0l-4-4a1 1 0 1 1 1.4-1.4L11 12.6V4a1 1 0 0 1 1-1ZM5 18a1 1 0 0 1 1 1h12a1 1 0 1 1 0 2H6a1 1 0 0 1-1-1Z"/>

@@ -2,9 +2,7 @@
 
 :root {
   --bd-pink: #fb7299;
-  --bd-pink-dark: #e35d84;
   --bd-blue: #00a1d6;
-  --bd-blue-dark: #0089b8;
   --bd-radius: 10px;
   --bd-radius-sm: 7px;
 
@@ -15,13 +13,34 @@
   --bd-text: #18191c;
   --bd-text-2: #61666d;
   /* v1.4.29 设计审查 M1：#9499a0 对白底仅 ≈2.7:1（AA 需 4.5:1），却用在最小字号。
-     提亮到 #6b7280（≈4.8:1），次要文字在小字号下仍可读。 */
-  --bd-text-3: #6b7280;
+     v1.4.30 复算：M1 提亮到 #6b7280 后**只**对纯白底达标（4.83:1）；
+     而 .sub/.stats/.p-dur 等实际位于 --bd-surface-2(#f0f1f4) 之上，实测仅 4.28:1 仍不达标。
+     再压暗到 #666c77 —— 对 白 / --bd-bg / --bd-surface-2 三底 = 5.28 / 4.93 / 4.68，全部 ≥4.5，
+     且仍比 --bd-text-2(#61666d) 略淡，三级层级保持。 */
+  --bd-text-3: #666c77;
   --bd-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
   --bd-shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.14);
   --bd-ok: #2fac4b;
   --bd-warn: #ff9800;
   --bd-err: #f04b4b;
+
+  /* ── v1.4.30 设计批次：前景 / 交互专用色 ──
+     上面五个语义色只够「填充 / 边框 / 装饰」用；一旦直接当**文字色**就掉到 AA 以下
+     （实测：--bd-ok/--bd-err/--bd-pink/--bd-blue 作亮底文字仅 2.6–3.5:1）。
+     这里为每色补一个「墨色」前景变体，徽章文字与焦点态统一取用。
+     亮/暗各一，避免出现「暗色下漏定义 → var() 落空」的盲区。 */
+  --bd-ok-ink: #17652a;
+  --bd-warn-ink: #855000;
+  --bd-err-ink: #b01d1d;
+  --bd-pink-ink: #b2174d;
+  --bd-blue-ink: #0b5e7d;
+  /* 焦点描边独立成 token：--bd-blue 描边对白底仅 2.97:1（非文本需 ≥3:1），深青在亮/暗下都够 */
+  --bd-focus: #0b5e7d;
+  /* 主按钮渐变两端：白字对各点均 ≥4.5:1（旧 --bd-pink 端白字仅 2.64:1） */
+  --bd-primary: #c93c6f;
+  --bd-primary-2: #a5264f;
+  /* 开关关态轨道描边：对 --bd-surface 的对比（浅 #fff 3.87 / 深 #202124 4.16，均 ≥3:1） */
+  --bd-track-off: #7c828b;
 
   --bd-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
   --bd-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
@@ -35,8 +54,21 @@
     --bd-border: #35373b;
     --bd-text: #e8eaed;
     --bd-text-2: #a8adb5;
-    /* v1.4.29 设计审查 M1：#7c8189 对 #202124 ≈3.6:1 不达标，提亮到 ≈4.6:1 */
-    --bd-text-3: #8a9099;
+    /* v1.4.29 设计审查 M1：#7c8189 对 #202124 ≈3.6:1 不达标，提亮到 ≈4.6:1。
+       v1.4.30 复算：#8a9099 对 --bd-surface-2(#2a2b2f) 只有 4.40:1，仍差一线。
+       提到 #8f959e —— 对 三底 = 5.34 / 5.89 / 4.69，且仍暗于 --bd-text-2(#a8adb5)。 */
+    --bd-text-3: #8f959e;
+    /* v1.4.30：暗色下的前景墨色（亮色底 → 提亮版），缺一不可，防止 var() 落空 */
+    --bd-ok-ink: #5ad37d;
+    --bd-warn-ink: #ffbb52;
+    --bd-err-ink: #ff9090;
+    --bd-pink-ink: #ff9dbb;
+    --bd-blue-ink: #63c9e8;
+    --bd-focus: #7fd4f0;
+    /* 暗色下主按钮块本身还要与 #202124 保持 ≥3:1 边界，
+       所以两端都收在「白字达标且块不糊进背景」的窄带内（#a5264f 在暗底只有 2.29:1） */
+    --bd-primary: #cb4073;
+    --bd-primary-2: #c23a6c;
     --bd-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
     --bd-shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.55);
   }
@@ -52,7 +84,10 @@
    Tab 导航则有 2px 蓝色描边。自绘控件（开关/分段）的原生 input 看不见，
    焦点态需派生到相邻可视元素（见各页面的 input:focus-visible + span 规则）。 */
 :focus-visible {
-  outline: 2px solid var(--bd-blue);
+  /* v1.4.30：改用 --bd-focus。旧值 var(--bd-blue)=#00a1d6 对白底仅 2.97:1，
+     低于 WCAG 1.4.11 对「非文本 UI 指示」的 3:1；--bd-focus 亮/暗分别为
+     #0b5e7d / #7fd4f0，对各自三种底色 6.39–10.64:1。 */
+  outline: 2px solid var(--bd-focus);
   outline-offset: 2px;
 }
 
@@ -93,8 +128,9 @@ button {
 }
 
 .bd-btn:hover:not(:disabled) {
-  border-color: var(--bd-pink);
-  color: var(--bd-pink);
+  border-color: var(--bd-pink-ink);
+  /* v1.4.30：--bd-pink(#fb7299) 作前景对白底仅 2.64:1，悬停文字改走墨色 */
+  color: var(--bd-pink-ink);
 }
 
 .bd-btn:active:not(:disabled) {
@@ -107,25 +143,20 @@ button {
 }
 
 .bd-btn--primary {
-  background: linear-gradient(135deg, var(--bd-pink), var(--bd-pink-dark));
+  /* v1.4.30 设计审查：旧渐变端 --bd-pink(#fb7299)/--bd-pink-dark(#e35d84) 上的白字
+     只有 2.64:1 / 3.41:1，主 CTA 文字达不到 AA。改走 --bd-primary(#c93c6f) →
+     --bd-primary-2(#a5264f)：白字 4.82 / 5.80 / 7.02（亮端/中点/暗端）全部 ≥4.5。
+     暗色主题下按钮块还需与 #202124 保持 ≥3:1 边界，故两端在暗色单独覆盖。 */
+  background: linear-gradient(135deg, var(--bd-primary), var(--bd-primary-2));
   border-color: transparent;
   color: #fff;
 }
 
 .bd-btn--primary:hover:not(:disabled) {
   color: #fff;
-  filter: brightness(1.06);
-}
-
-.bd-btn--blue {
-  background: var(--bd-blue);
-  border-color: transparent;
-  color: #fff;
-}
-
-.bd-btn--blue:hover:not(:disabled) {
-  color: #fff;
-  background: var(--bd-blue-dark);
+  /* v1.4.30：旧值 brightness(1.06) 会把渐变亮端提亮到白字 4.35:1（跌回失败）。
+     改为轻微压暗（仍是"变active"的直觉反馈），两端对比度反而上升。 */
+  filter: brightness(0.95);
 }
 
 .bd-btn--ghost {
@@ -140,8 +171,9 @@ button {
 }
 
 .bd-btn--danger:hover:not(:disabled) {
-  border-color: var(--bd-err);
-  color: var(--bd-err);
+  /* v1.4.30：--bd-err(#f04b4b) 作文字对白底仅 3.32:1，同批收进墨色 */
+  border-color: var(--bd-err-ink);
+  color: var(--bd-err-ink);
 }
 
 .bd-btn--sm {
@@ -183,7 +215,10 @@ button {
 
 .bd-input:focus,
 .bd-select:focus {
-  border-color: var(--bd-blue);
+  /* v1.4.30：输入框的键盘焦点是这条 1px 边框（全局描边被上面 :focus-visible 规则排除），
+     旧 --bd-blue(#00a1d6) 对白底仅 2.97:1，差 1.4.11 的 3:1 一线；改走 --bd-focus（7.21:1）。
+     光晕保留为加固层（仅作次级提示，不单独承担对比指标）。 */
+  border-color: var(--bd-focus);
   /* v1.4.29 设计审查 M2：0.14 的光晕在白底上远低于 3:1 非文本对比标准，提到 0.35 */
   box-shadow: 0 0 0 3px rgba(0, 161, 214, 0.35);
 }
@@ -203,9 +238,12 @@ button {
   height: 20px;
   border-radius: 999px;
   /* v1.4.29 设计审查 m2：旧值 = var(--bd-border)，关态轨道与边框同色几乎隐形。
-     改用 surface-2 底 + 内描边，关态可辨识。 */
+     改用 surface-2 底 + 内描边，关态可辨识。
+     v1.4.30 复算：内描边仍取 --bd-border(#e3e5e9)，对白底只有 1.13:1 —— 
+     「关」这个状态对用户仍近乎不可见（WCAG 1.4.11 需 ≥3:1）。内描边改走
+     --bd-track-off(#7c828b)：浅底 3.87、深底 4.16，开关的「关」终于看得见。 */
   background: var(--bd-surface-2);
-  box-shadow: inset 0 0 0 1px var(--bd-border);
+  box-shadow: inset 0 0 0 1px var(--bd-track-off);
   position: relative;
   cursor: pointer;
   transition: background 0.18s ease;
@@ -227,8 +265,12 @@ button {
 }
 
 .bd-switch input:checked {
-  background: var(--bd-pink);
-  /* 选中态盖掉关态的内描边，避免粉色轨道上出现灰色细环 */
+  /* v1.4.30：开启态旧值 = var(--bd-pink)=#fb7299，轨道对白底 2.64:1、
+     白色滑块对轨道同样 2.64:1 —— 与「关态」同款非文本对比不足。
+     改用 --bd-primary：亮 #c93c6f（对白底 4.82）、暗 #cb4073（对 #202124 3.47、白滑块 4.65），
+     「开 / 关」两态现在都 ≥3:1。 */
+  background: var(--bd-primary);
+  /* 选中态盖掉关态的内描边，避免深色轨道上出现灰色细环 */
   box-shadow: none;
 }
 
@@ -251,27 +293,33 @@ button {
 
 .bd-badge--pink {
   background: rgba(251, 114, 153, 0.14);
-  color: var(--bd-pink-dark);
+  /* v1.4.30：旧 --bd-pink-dark(#e35d84) 作文字对 14% 粉底仅 3.46:1，
+     改走墨色 #b2174d（亮 5.88 / 暗 6.66，均 ≥4.5） */
+  color: var(--bd-pink-ink);
 }
 
 .bd-badge--blue {
   background: rgba(0, 161, 214, 0.14);
-  color: var(--bd-blue-dark);
+  /* v1.4.30：旧 --bd-blue-dark(#0089b8) 作文字仅 3.30:1，改走墨色 */
+  color: var(--bd-blue-ink);
 }
 
 .bd-badge--ok {
   background: rgba(47, 172, 75, 0.14);
-  color: var(--bd-ok);
+  /* v1.4.30：旧 --bd-ok(#2fac4b) 作文字仅 2.92:1，改走墨色 */
+  color: var(--bd-ok-ink);
 }
 
 .bd-badge--warn {
   background: rgba(255, 152, 0, 0.16);
-  color: #c77700;
+  /* v1.4.30：旧硬编码 #c77700 是游离于 token 外的第三套 warn 色（仅 3.34:1），收进墨色 */
+  color: var(--bd-warn-ink);
 }
 
 .bd-badge--err {
   background: rgba(240, 75, 75, 0.14);
-  color: var(--bd-err);
+  /* v1.4.30：旧 --bd-err(#f04b4b) 作文字仅 3.32:1，改走墨色 */
+  color: var(--bd-err-ink);
 }
 
 .bd-progress {
@@ -338,7 +386,10 @@ button {
   .bd-progress > i,
   .bd-btn,
   .bd-input,
-  .bd-select {
+  .bd-select,
+  /* v1.4.30：补齐开关的轨道底色与滑块位移两个过渡（原列表漏了它们） */
+  .bd-switch input,
+  .bd-switch input::after {
     transition: none;
   }
 }

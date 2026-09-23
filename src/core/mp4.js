@@ -285,7 +285,17 @@ export async function scanFile(source) {
         const moofBytes = await source.read(absStart, b.size);
         const tail = await source.read(absStart + b.size, 16);
         const mdatHeader = tail.length >= 8 ? readBoxHeaderLoose(tail, 0) : null;
-        if (!mdatHeader) break;
+        if (!mdatHeader) {
+          // ★ v1.4.30：原来这里直接 `break` —— 文件在 moof 之后被截断（该 moof 的
+          //   mdat 缺失，或剩余字节不足 8 读不出头）会被**静默**当成"片段到此为止"。
+          //   后果是产出「能播但缺末尾」的合法文件，真机上极难发现 —— 本项目最危险
+          //   的失败形态。实测：完整 2 片段，去掉第 2 个 mdat 后旧实现只扫到 1 个片段
+          //   且不抛错。这里改为明确报错（与"文件不完整"文案保持同款措辞）。
+          throw new Error(
+            `文件不完整：偏移 ${absStart + b.size} 处的 moof 之后未找到完整的 mdat` +
+            `（剩余 ${source.size - (absStart + b.size)} 字节）。文件可能在 moof 边界被截断，请重新下载。`,
+          );
+        }
         if (mdatHeader.type !== 'mdat') {
           // 原来是「mdatSize = 0」 -> 静默丢掉这个片段的 mdat。
           // 静默丢数据是最坏的一类失败，改为明确报错。
@@ -300,7 +310,7 @@ export async function scanFile(source) {
             `文件不完整：最后一个 mdat 被截断（声明 ${mdatSize} 字节）。请重新下载`,
           );
         }
-        const info = parseMoof(moofBytes, absStart, mediaTimescale, trexDefaults);
+        const info = parseMoof(moofBytes, absStart, mediaTimescale, trexDefaults, mdatSize);
         const mfhdSeq = findMfhdSeqOffset(moofBytes);
         fragments.push({
           moofStart: absStart,
@@ -346,8 +356,24 @@ export async function scanFile(source) {
  * 未显式携带 sample_duration 时，回退顺序为：tfhd 的 default_sample_duration
  * → trex 的 default_sample_duration。B 站 m4s 的 tfhd 通常只有
  * default-base-is-moof（0x020000），所以时长实际来自 trex（视频 640、音频 1024）。
+ *
+ * @param {Uint8Array} bytes 整个 moof 的字节
+ * @param {{start:number,end:number,headerSize:number}} trun trun 盒
+ * @param {{start:number,headerSize:number}|null} tfhd 同 traf 的 tfhd
+ * @param {{duration:number}|null} trexDefaults
+ * @param {number} [mediaBytes] 该片段紧随其后的 mdat 字节数（样本数上界）
  */
-function readTrunDuration(bytes, trun, tfhd, trexDefaults) {
+/**
+ * trun 样本数的**兜底绝对上界**。
+ *
+ * 只在「trun 既没有逐样本时长、也没有逐样本大小/标志/cto」时才用得上 —— 那时
+ * 拿不到逐条记录的字节数，只能退回与 mdat 字节数比较；若连 mdat 大小都不可知，
+ * 就用这个常量兜底，防止 sample_count 被构造成 0xFFFFFFFF 时在 muxing 阶段空转。
+ * 正常 B 站分片远不会触及（一个片段通常几百到几千个样本）。
+ */
+const MAX_TRUN_SAMPLES = 1 << 20;
+
+function readTrunDuration(bytes, trun, tfhd, trexDefaults, mediaBytes = 0) {
   const flags = boxFlags(bytes, trun);
   let p = trun.start + trun.headerSize + 4;
   const sampleCount = u32(bytes, p);
@@ -355,9 +381,40 @@ function readTrunDuration(bytes, trun, tfhd, trexDefaults) {
   if (flags & 0x000001) p += 4; // data_offset（int32，相对 base_data_offset）
   if (flags & 0x000004) p += 4; // first_sample_flags
 
+  const hasDuration = !!(flags & 0x000100);
+  const hasSampleSize = !!(flags & 0x000200);
+  const hasSampleFlags = !!(flags & 0x000400);
+  const hasCto = !!(flags & 0x000800);
+
+  // ★ v1.4.30 健壮性：sample_count 无上界 → 合并阶段空转。
+  //   实测（对照探针）：把 sample_count 篡改成 0xFFFFFFFF（盒结构完全合法，只是
+  //   该字段损坏/被构造）后，旧实现要跑满 ~42 秒（双轨 ~84 秒）才返回，期间 muxing
+  //   完全卡死，且**不报错**（u32 越界读返回 0，静默当成时长 0）。
+  //   两道相互独立的防线，任一超限即判文件损坏并**抛出**（绝不静默 continue）：
+  //     ① 结构上界：trun 盒自身的字节必须真的装得下 sampleCount 条逐样本记录；
+  //     ② 媒体上界：样本数不可能超过该片段 mdat 的字节数（每条样本至少占 1 字节）。
+  //   正常的 B 站分片两条都远不会触发。
+  const perSampleBytes = 4 * ((hasDuration ? 1 : 0) + (hasSampleSize ? 1 : 0) + (hasSampleFlags ? 1 : 0) + (hasCto ? 1 : 0));
+  if (perSampleBytes > 0) {
+    const capacity = Math.floor((trun.end - p) / perSampleBytes);
+    if (sampleCount > capacity) {
+      throw new Error(
+        `trun 声明 ${sampleCount} 个样本，但盒内只够 ${capacity} 条逐样本记录` +
+        `（偏移 ${trun.start}）。文件结构损坏，无法安全合并，请重新下载。`,
+      );
+    }
+  } else {
+    const mediaBound = mediaBytes > 0 ? mediaBytes : MAX_TRUN_SAMPLES;
+    if (sampleCount > mediaBound) {
+      throw new Error(
+        `trun 声明 ${sampleCount} 个样本，远超片段媒体数据量 ${mediaBound} 字节` +
+        `（偏移 ${trun.start}）。文件结构损坏，请重新下载。`,
+      );
+    }
+  }
+
   const defDuration = tfhd ? readTfhdDefaultDuration(bytes, tfhd) : 0;
   const fallback = defDuration || trexDefaults?.duration || 0;
-  const hasDuration = !!(flags & 0x000100);
   let total = 0;
   for (let i = 0; i < sampleCount; i++) {
     if (hasDuration) {
@@ -366,17 +423,17 @@ function readTrunDuration(bytes, trun, tfhd, trexDefaults) {
     } else {
       total += fallback;
     }
-    if (flags & 0x000200) p += 4; // sample_size
-    if (flags & 0x000400) p += 4; // sample_flags
+    if (hasSampleSize) p += 4;
+    if (hasSampleFlags) p += 4;
     // sample_composition_time_offset：version 1 时是 int32（有符号），
     // 但这里只跳过不取值，所以有无符号都不影响。
-    if (flags & 0x000800) p += 4;
+    if (hasCto) p += 4;
   }
   return total;
 }
 
 /** 解析 moof，取出轨道号、解码时间与总时长。 */
-function parseMoof(moofBytes, absMoofStart, mediaTimescale, trexDefaults) {
+function parseMoof(moofBytes, absMoofStart, mediaTimescale, trexDefaults, mediaBytes = 0) {
   const result = {
     trackId: 1,
     baseTime: 0,
@@ -431,7 +488,7 @@ function parseMoof(moofBytes, absMoofStart, mediaTimescale, trexDefaults) {
 
     let trafDuration = 0;
     for (const trun of findBoxes(trafChildren, 'trun')) {
-      trafDuration += readTrunDuration(moofBytes, trun, tfhd, trexDefaults);
+      trafDuration += readTrunDuration(moofBytes, trun, tfhd, trexDefaults, mediaBytes);
     }
 
     baseTime = Math.min(baseTime, trafBaseTime);

@@ -32,6 +32,60 @@ function appendPendingTasks(tasks) {
   return pendingTasksWriteChain;
 }
 
+/**
+ * 在**同一条串行链**上「读 + 清空」`pendingTasks`，返回被取走的那一批。
+ *
+ * ★ v1.4.30：取任务这一步必须由 SW 独占（dashboard 只负责建任务）。
+ *
+ *   原实现是 dashboard 自己 `get` → `remove('pendingTasks')`。`remove` 是**整体删键**，
+ *   与这里的 `appendPendingTasks`（`get` → `set [existing, ...tasks]`）并发时会互相吃掉：
+ *     SW: get→[A] │ dashboard: get→[A] │ SW: set→[A,B] │ dashboard: remove
+ *   → 用户刚点的那一票（B）被删掉，**任务凭空消失**，UI 上什么都不出现；
+ *   反过来的交错则会把已消费的 A 写回 storage → 重开下载中心后重复下载。
+ *   storage 没有事务，所以唯一可靠的解法是让**所有**读改写落在同一个上下文
+ *   （SW 是单线程事件循环，一条 Promise 链就足以串行化）。
+ */
+function consumePendingTasks() {
+  pendingTasksWriteChain = pendingTasksWriteChain
+    .catch(() => {})
+    .then(async () => {
+      const { pendingTasks = [] } = await chrome.storage.local.get('pendingTasks');
+      if (pendingTasks.length) await chrome.storage.local.remove('pendingTasks');
+      return pendingTasks;
+    });
+  return pendingTasksWriteChain;
+}
+
+/**
+ * 在**同一条串行链**上按 `{cid, bvid, pageIndex}` 精确移除条目。
+ *
+ * 为什么不是 `remove` 整体删：一次任务结束时只需要拿掉属于它的那一条，
+ * 其它并发追加进来的条目必须原样保留。旧实现（dashboard 侧 `get → filter → set`）
+ * 会把旧快照连同新条目一起写回去，或反过来把条目复活。
+ */
+function prunePendingTasks({ cid, bvid, pageIndex } = {}) {
+  const c = Number(cid || 0);
+  const bv = bvid || '';
+  const page = Number(pageIndex || 0);
+  pendingTasksWriteChain = pendingTasksWriteChain
+    .catch(() => {})
+    .then(async () => {
+      const { pendingTasks = [] } = await chrome.storage.local.get('pendingTasks');
+      if (!pendingTasks.length) return;
+      const next = pendingTasks.filter((s) => {
+        if (!s || typeof s !== 'object') return false;
+        const sameCid = c > 0 && Number(s.cid || 0) === c;
+        const sameBvid = bv && s.bvid === bv;
+        if (!sameCid && !sameBvid) return true;        // 不相关，保留
+        return Number(s.pageIndex || 0) !== page;      // 相关且同 P -> 移除
+      });
+      if (next.length !== pendingTasks.length) {
+        await chrome.storage.local.set({ pendingTasks: next });
+      }
+    });
+  return pendingTasksWriteChain;
+}
+
 /** 打开（或聚焦）下载中心，并把待下载任务塞进 storage 交给它。 */
 async function openDashboard(pendingTasks = [], { focus = true } = {}) {
   if (pendingTasks.length) {
@@ -50,28 +104,6 @@ async function openDashboard(pendingTasks = [], { focus = true } = {}) {
   }
   const tab = await chrome.tabs.create({ url: DASHBOARD_URL, active: focus });
   return tab.id;
-}
-
-/** 从标签页 URL / 页面里解析出视频标识。 */
-function resolveTabVideoId(tab) {
-  if (!tab?.url) return null;
-  const direct = extractVideoId(tab.url);
-  if (direct) return direct;
-  return null;
-}
-
-/** 组装一个「下载当前页视频」的任务规格。 */
-function buildSpecFromTab(tab) {
-  const id = resolveTabVideoId(tab);
-  if (!id) return null;
-  const url = new URL(tab.url);
-  const p = Number(url.searchParams.get('p')) || 1;
-  return {
-    ...id,
-    pageIndex: p - 1,
-    sourceUrl: tab.url,
-    isBatch: false,
-  };
 }
 
 chrome.runtime.onInstalled.addListener(async (details) => {
@@ -139,18 +171,24 @@ const handlers = {
     return { ok: true };
   },
 
-  async PARSE_TAB() {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const spec = buildSpecFromTab(tab);
-    return { ok: true, spec, tab: tab ? { id: tab.id, url: tab.url, title: tab.title } : null };
+  // ★ v1.4.30：新增两个「待处理队列」端点，让 SW 独占 pendingTasks 的读改写
+  //   （原因见上面 consumePendingTasks / prunePendingTasks 的说明）。
+  //
+  // ⚠️ 同时删除了原来的 PARSE_TAB 与 PING 两个 handler：它们在**全库**
+  //   （src / tools / docs）零发送方，是死端点；而 PARSE_TAB 还是 `tabs` 权限
+  //   唯一"读任意标签页 url/title"的用途 —— 删掉它之后该权限才有收窄的余地
+  //   （收窄本身不在本轮范围，见 docs/VERIFICATION-STATUS.md 的待办）。
+  async CONSUME_PENDING() {
+    return { ok: true, tasks: await consumePendingTasks() };
+  },
+
+  async PRUNE_PENDING(msg) {
+    await prunePendingTasks(msg?.payload || {});
+    return { ok: true };
   },
 
   async GET_SETTINGS() {
     return { ok: true, settings: await loadSettings() };
-  },
-
-  async PING() {
-    return { ok: true, pong: Date.now() };
   },
 };
 

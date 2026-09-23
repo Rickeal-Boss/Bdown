@@ -77,6 +77,16 @@ export class Task {
      * 只要 size 恰好一致就会续到一份**残缺的旧数据**上，产出静默损坏的文件。
      */
     this.resumeKeys = [];
+
+    /**
+     * 本任务占用的防重指纹键（v1.4.30）。
+     *
+     * ★ 必须**记在任务上**，而不是在释放时重新算一遍 —— `ensureSpecComplete()`
+     *   会**原地改写** spec（补 cid，番剧还会补 bvid/aid/epId）。事后重算出来的键
+     *   与注册时的键不相等，`Set.delete()` 对不存在的键**静默返回 false**，
+     *   连报错都没有 → 指纹永久泄漏（见下方 specKey 的详细说明）。
+     */
+    this.specKey = '';
   }
 
   get canceled() {
@@ -160,6 +170,29 @@ async function closeSinkQuietly(sink, label = 'sink') {
   } catch (err) {
     warn(`关闭${label}失败（继续尝试读取，可能是半截文件）`, err?.message);
   }
+}
+
+/**
+ * `fetchTo` 的 abort 收尾出口：**先关 sink（把字节真正落盘）再记清单，然后由调用方抛**。
+ *
+ * 顺序不能颠倒：续传用的 `.part` 是 FileHandleSink，它的 writable 从 open() 起一直开着。
+ * 不关会有两个后果：
+ *   ① 已写的字节可能还在 writable 缓冲区里没落盘，而清单已经把这些区间记成"已完成"；
+ *   ② 下次「继续」时 openPartial 会对**同一个 .part 文件**再开一个 writable ——
+ *      同一 OPFS 文件两个 writable 并存 → 写入互相覆盖，或直接抛错。
+ *
+ * ★ v1.4.30：从 `fetchTo` 的内联闭包抽成模块级导出函数，**唯一目的是可断言**。
+ *   它住在 fetchTo 里时，变异测试删掉 `closeSinkQuietly(...)` 那一行，33 个套件
+ *   依旧全绿（没有任何测试能碰到它）。抽出来之后 tools/test-lifecycle.mjs 可以直接
+ *   用一个假 sink 断言「取消时确实关了 sink，且关在 persist 之前」。
+ *
+ * @param {{sink: object, persist: () => Promise<void>}} o
+ * @param {object} o.sink 要关闭的写入目标
+ * @param {() => Promise<void>} o.persist 把已完成区间写进续传清单（失败不抛）
+ */
+export async function abortFetchExit({ sink, persist }) {
+  await closeSinkQuietly(sink, '续传分片');
+  await persist().catch(() => {});
 }
 
 /**
@@ -257,6 +290,9 @@ export class DownloadEngine {
     };
     /** 记录需要清理的中间文件 */
     const tempNames = [];
+
+    /** @type {{ video?: MemorySink|FileHandleSink, audio?: MemorySink|FileHandleSink, out?: MemorySink|FileHandleSink }} */
+    const staging = {};
 
     try {
       if (task.canceled) throw new DownloadAborted();
@@ -423,9 +459,6 @@ export class DownloadEngine {
           : 0;
         this.emit(task);
       };
-
-      /** @type {{ video?: MemorySink|FileHandleSink, audio?: MemorySink|FileHandleSink }} */
-      const staging = {};
 
       if (plan.mode === 'durl') {
         // ★ 必须下载**全部分段**并依次拼接。
@@ -615,6 +648,7 @@ export class DownloadEngine {
           sizeHint: plan.totalBytes,
           tempNames,
         });
+        staging.out = out.sink;
         await this.mergeInto({
           task,
           // 注意：这里是 vPrep.sink / aPrep.sink（prepareStage 的返回值）。
@@ -656,6 +690,20 @@ export class DownloadEngine {
         task.error = err?.message || String(err);
         task.finishedAt = Date.now();
         warn('任务失败', task.id, err);
+        // ★ v1.4.30：**普通失败路径必须把已打开的输出 sink 关掉**。
+        //
+        //   此前只有成功路径（finishOutput → persist → sink.close）与 abort 路径
+        //   （abortExit）会关；scanFile 抛错 / 格式不符 / 重试耗尽这类失败直接落到
+        //   这里，writable 一直悬空：
+        //     - 直写用户文件句柄时（ask + merge 的默认单任务路径），句柄被锁，
+        //       且文件已被 resetSink 截成 0 字节 → 点「重试」可能再也打不开；
+        //     - 续传开启时 .part 的 writable 悬空，下次 openPartial 会对**同一个
+        //       文件**再开一个 writable（"两个 writable 并存写同一文件"的坏文件场景）。
+        //   close() 幂等（close 后把 writable 置 null，再调是空操作），
+        //   所以成功路径已经关过的那几个再关一次无害。
+        for (const s of [staging.video, staging.audio, staging.out]) {
+          await closeSinkQuietly(s, '失败收尾');
+        }
         setStatus('error', task.error);
       }
     } finally {
@@ -839,7 +887,13 @@ export class DownloadEngine {
    */
   async fetchTo({ urls, size, sink, onProgress, signal, probe = true, resume = null, refreshUrls = null, writeOffset = 0 }) {
     let list = (urls || []).filter(Boolean);
-    if (!list.length) throw new Error('没有可用的下载地址');
+    if (!list.length) {
+      // ★ v1.4.30：这条出口是在调用方**已经打开 sink 之后**才触发的
+      //   （prepareStage / createOutput 都先建了 sink）。直接 throw 等于把
+      //   writable 悬空 —— 与 abortExit 的收尾语义不一致。先收尾再抛。
+      await closeSinkQuietly(sink, '无可用地址收尾');
+      throw new Error('没有可用的下载地址');
+    }
     let total = size;
     if (!total && !probe) {
       const p = await probeSize(list[0], { signal });
@@ -959,10 +1013,8 @@ export class DownloadEngine {
       //   收尾 —— sink 的 writable 不关、已完成的区间不落清单，
       //   下次「继续」对同一 .part 再开一个 writable（两个 writable 并存，
       //   写入互相覆盖）。三条出口现在统一经过 abortExit。
-      const abortExit = async () => {
-        await closeSinkQuietly(sink, '续传分片');
-        await persistProgress().catch(() => {});
-      };
+      // abort 收尾出口（实现见模块级 abortFetchExit —— 抽成导出函数才可被行为断言）
+      const abortExit = () => abortFetchExit({ sink, persist: persistProgress });
       if (err instanceof DownloadAborted) {
         // ★ 用户取消 / 暂停：必须**先关掉 sink**再记清单、再抛。
         //
@@ -1070,7 +1122,16 @@ export class DownloadEngine {
       await resetSink(sink);
       // 回退顺序下载时不能续传（会重下整个文件），清掉清单避免半份残留
       if (resume) await resume.store.clear(resume.key).catch(() => {});
-      return downloadSequential({ urls: list, sink, signal, onProgress });
+      // ★ v1.4.30：顺序下载是 fetchTo 的**第四条出口**，此前不经过 abortExit。
+      //   暂停 / 取消正好落在这条路径上时，DownloadAborted 直接穿出 fetchTo，
+      //   sink 不关、已完成区间不落清单 —— 正是 v1.4.29 修的那两条重试子路径
+      //   之外的漏网一条（同一处收口又漏了一个出口）。
+      try {
+        return await downloadSequential({ urls: list, sink, signal, onProgress });
+      } catch (e3) {
+        if (e3 instanceof DownloadAborted) await abortExit();
+        throw e3;
+      }
     }
   }
 
@@ -1256,7 +1317,18 @@ export class DownloadEngine {
         const page = info.pages?.[spec.pageIndex || 0];
         // 形态按**视频类型**定，不按 P 数：
         //   普通视频（哪怕是多P）是 movie，只有番剧 / 课程才是 episode
-        const isBangumi = !!(spec.epId || spec.seasonId || spec.cheeseId);
+        //
+        // ★ v1.4.30（产品审查 F-4）：这里原来把 `spec.seasonId` 也算作番剧标志，
+        //   但 **UGC 合集批量下载时 popup 会把 `ugcSeason.id` 写进 `seasonId`**
+        //   （见 popup.js collectSpecs 合集分支 `seasonId: ugcSeason.id`）。
+        //   于是「下载整个合集」产出的每一集 NFO 都被写成 episode，且
+        //   season=1 / episode=1（episode 取 pageIndex+1，而合集逐集都是单 P）
+        //   —— 整批元数据全错，刮削器会把它当成同一集的重复。
+        //
+        //   番剧的真正标志是 `epId`：popup 的番剧分支（`epId: ep.ep_id`）与
+        //   engine.ensureSpecComplete 的番剧分支都会把 epId 落定，
+        //   所以用 `epId` 判定既充分又必要；`seasonId` 单独出现时必须视为 UGC 合集。
+        const isBangumi = !!(spec.epId || spec.cheeseId);
         const nfo = buildNfo({
           kind: isBangumi ? 'episode' : 'movie',
           title: isBangumi && page?.part
@@ -1341,8 +1413,10 @@ async function streamInto(writable, blob) {
  */
 export async function ensureSpecComplete(spec, api, isCanceled = () => false) {
   if (spec.cid) return spec;
-  // 课程只需要 cheeseId 就能反查 cid；其余类型至少要能定位到一个视频
-  if (!spec.bvid && !spec.aid && !spec.cheeseId) return spec;
+  // 至少要有一个能定位到视频的标识，否则无从补全。
+  // ★ v1.4.30：原判据漏了 `epId` / `seasonId` —— 番剧的 spec **只有这两个字段之一**
+  //   （content script 悬浮按钮 / 播放器按钮 / 右键菜单都只解析 URL）。
+  if (!spec.bvid && !spec.aid && !spec.cheeseId && !spec.epId && !spec.seasonId) return spec;
   if (isCanceled()) return spec;
 
   let info = null;
@@ -1352,13 +1426,38 @@ export async function ensureSpecComplete(spec, api, isCanceled = () => false) {
       // 注：课程接口需要登录且通常是付费内容，这条路径**没有真机验证过**，
       // 失败会 warn 并回退，不会让任务更糟。
       const season = await api.cheeseSeason(spec.cheeseId);
-      const ep = (season?.episodes || []).find((e) => Number(e.id) === Number(spec.cheeseId));
+      const eps = season?.episodes || [];
+      // ep 级精确匹配；匹配不到（例如 /cheese/play/ss<id> 传进来的 season id）
+      // 退回第一集 —— 与 popup.loadVideo 的分支保持同一语义，避免两处行为分叉。
+      const ep = eps.find((e) => Number(e.id) === Number(spec.cheeseId)) || eps[0];
       if (ep && Number(ep.cid) > 0) {
         spec.cid = Number(ep.cid);
         if (!spec.title && ep.title) spec.title = ep.title;
         return spec;
       }
       warn('课程：未能从 season 接口解析出 cid', 'cheeseId=' + spec.cheeseId);
+      return spec;
+    }
+    // 番剧（pgc）：spec 只有 epId / seasonId，用与 popup.loadVideo 同源的接口反查。
+    // ★ v1.4.30：这条分支此前**完全缺失** → 番剧页的悬浮按钮 / 播放器按钮 /
+    //   右键菜单 100% 报「任务缺少 cid (-400)」（弹窗入口自己能反查，所以只有
+    //   页面按钮那条路是断的 —— 同一功能两条入口一个通一个断）。
+    if (spec.epId || spec.seasonId) {
+      const season = await api.seasonInfo(spec.seasonId, { epId: spec.epId });
+      const eps = season?.result?.episodes || [];
+      const ep = (spec.epId ? eps.find((e) => Number(e.ep_id) === Number(spec.epId)) : null) || eps[0];
+      if (ep && Number(ep.cid) > 0) {
+        spec.cid = Number(ep.cid);
+        // ★ epId 必须落定：api.playurl 靠它把 kind 判成 'pgc' 并打到
+        //   /pgc/player/web/v2/playurl。只有 seasonId 的链接（/ss<id>）在此收窄到具体一集。
+        if (Number(ep.ep_id) > 0) spec.epId = Number(ep.ep_id);
+        if (!spec.bvid && ep.bvid) spec.bvid = ep.bvid;
+        if (!spec.aid && ep.aid) spec.aid = Number(ep.aid);
+        if (!spec.title) spec.title = season?.result?.season_title || ep.title || '';
+        if (!spec.cover && ep.cover) spec.cover = ep.cover;
+        return spec;
+      }
+      warn('番剧：未能从 season 接口解析出 cid', 'epId=' + spec.epId + ' seasonId=' + spec.seasonId);
       return spec;
     }
     info = await api.videoInfo({ bvid: spec.bvid, aid: spec.aid });
@@ -1396,6 +1495,103 @@ export async function ensureSpecComplete(spec, api, isCanceled = () => false) {
     };
   }
   return spec;
+}
+
+/**
+ * 任务的稳定指纹：同一视频 + 同一分P + 同一清晰度 = 同一个任务。
+ *
+ * ★ **绝不能把 `cid` 算进指纹**（v1.4.30 修的 P1）。
+ *
+ *   `cid` 不是任务身份，而是 `bvid/aid/epId/cheeseId` + `pageIndex` 的**派生值**
+ *   —— 由上面的 `ensureSpecComplete()` **原地补写**进同一个 spec 对象。
+ *   而指纹原来的两个使用点是不对称的：
+ *     - 注册：`dashboard.acceptPending()` 用 **storage 里原始（未补全）** 的 spec 算键。
+ *       内容脚本悬浮按钮 / 播放器按钮 / 右键菜单派发的 spec **根本没有 cid**
+ *       （它们只能从 URL 解析出 bvid / epId / seasonId）。
+ *     - 释放：`dashboard.releaseSpecKey(task)` 用 **run() 补全之后** 的 `task.spec` 算键。
+ *   两个键永远不相等 → `Set.delete()` 删的是一个不存在的键（静默返回 false，不报错）
+ *   → 指纹**永久泄漏**。后果：从页面按钮下载过的视频，在**同一次会话内**再也派发
+ *   不出去 —— `acceptPending` 直接 `continue`，连 toast 都没有。
+ *
+ *   ★ 所以本函数与 `ensureSpecComplete` **必须住在同一个模块**：定义身份的代码和
+ *   改写身份的代码分开，正是这个 bug 能长期隐藏的原因。
+ *
+ *   唯一性没有降低：`pageIndex` 在键里（同一 bvid 的不同 P 不会互撞）；番剧靠
+ *   `epId` / `seasonId`（两者同归一格）、课程靠 `cheeseId`、清晰度靠 `quality`。
+ *   只有当 spec 里**一个上游标识都没有**（脏数据）时才退回用 `cid` 兜底，
+ *   避免所有脏数据塌缩到同一个空键而互相误杀。
+ *
+ * @param {{bvid?:string|number, aid?:number|string, cid?:number|string, epId?:number|string,
+ *          seasonId?:number|string, cheeseId?:number|string,
+ *          pageIndex?:number, quality?:number}|null|undefined} spec
+ * @returns {string}
+ */
+export function specKey(spec) {
+  const bvid = spec?.bvid || '';
+  const aid = spec?.aid || '';
+  const epId = spec?.epId || spec?.seasonId || '';
+  const cheeseId = spec?.cheeseId || '';
+  const anchor = bvid || aid || epId || cheeseId;
+  return [
+    bvid,
+    aid,
+    epId,
+    cheeseId,
+    // cid 只在没有任何上游标识时兜底（见上方说明）
+    anchor ? '' : (spec?.cid || ''),
+    spec?.pageIndex ?? 0,
+    spec?.quality ?? 0,
+  ].join('|');
+}
+
+/**
+ * 任务指纹注册表（防重复派发）。
+ *
+ * 为什么不写成「注册时算一次键、释放时再算一次」：`ensureSpecComplete` 会**原地改写**
+ * spec（补 cid；番剧还会补 bvid/aid/epId），任何"事后重算"都可能算出不同的键。
+ * 所以 `claim()` 把算出的键**记在 task 上**，`release()` 直接删这一把键 ——
+ * 无论 spec 在运行期被改成什么样，注册与释放作用的都是同一个键。
+ *
+ * 抽成独立的类而不是散在 dashboard.js 里的两个裸函数，是为了能在 Node 里直接断言
+ * 「注册 → 补全 spec → 释放 → 集合必须回到空」（见 tools/test-spec-key.mjs）：
+ * dashboard.js 依赖 document / chrome，无法在 CI 里 import。
+ */
+export class SpecKeyRegistry {
+  constructor() {
+    /** @type {Set<string>} */
+    this.keys = new Set();
+  }
+
+  /** 该 spec 是否已被占用（在飞 / 已派发且未释放）。 */
+  has(spec) {
+    return this.keys.has(specKey(spec));
+  }
+
+  /**
+   * 为 task 占位，返回占用的键（同时写到 `task.specKey` 上备释放）。
+   *
+   * ★ 已有键的任务（终态后点「重试」）**优先复用原键**：重试期间 spec 已被
+   *   `ensureSpecComplete` 改写过，重算会得到另一把键 —— 于是「重试中的任务」与
+   *   「内容脚本刚派发的同一视频」不再互斥 → 两个任务并发写同一个 `.part`。
+   *   （v1.4.30 运行时排障手 F4 缺口 B。）
+   */
+  claim(task) {
+    const key = task?.specKey || specKey(task?.spec || {});
+    if (task) task.specKey = key;
+    this.keys.add(key);
+    return key;
+  }
+
+  /**
+   * 释放 task 占过的键。task 上没有记录时退化为按当前 spec 重算一次。
+   *
+   * ★ 刻意**不**清空 `task.specKey`：任务还能被「重试」，重试时要占回同一把键
+   *   （见 claim 的说明）。
+   */
+  release(task) {
+    const key = task?.specKey || specKey(task?.spec || {});
+    this.keys.delete(key);
+  }
 }
 
 /**
