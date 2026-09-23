@@ -726,12 +726,30 @@ console.log('\n[10] v1.4.29 六路审查修复回归守卫（DOM 模块用源码
   // 存在时执行；error 不再阻塞 tmp 清理（error 任务不写 tmp），但**必须**继续
   // 阻塞 bdown-resume 清理（.part/.json 留给「重试」）。
   check('btnClean 先判定在跑再清理 tmp，且 error 仍阻塞 resume 清理', () => {
-    if (!/const busy = engine\.tasks\.some\(\(t\) =>\s*\n?\s*\['downloading', 'paused', 'resolving', 'muxing', 'saving'\]/.test(DASH_JS))
+    // v1.4.31（QA 审查 W4）：守卫从「存在性」升级为「顺序 + 门控」——
+    // busy 判定必须在 cleanupAll 之前、resume 清理必须被 !keepResume 门控。
+    const busyAt = DASH_JS.search(
+      /const busy = engine\.tasks\.some\(\(t\) =>\s*\n?\s*\['downloading', 'paused', 'resolving', 'muxing', 'saving'\]/);
+    // 带分号匹配**语句**——btnClean 上方的说明注释里也含「await engine.cleanupAll()」
+    // 字样（带箭头无分号），不带分号会把注释行误当成语句、顺序判断恒错
+    const cleanAt = DASH_JS.search(/await engine\.cleanupAll\(\);/);
+    if (busyAt === -1 || cleanAt === -1 || busyAt > cleanAt)
       return 'busy 判定未前移到 cleanupAll 之前（会删掉在途大文件的临时产物）';
     if (!/keepResume = engine\.tasks\.some\(\(t\) => t\.status === 'error'\)/.test(DASH_JS))
       return 'error 任务未阻塞 bdown-resume 清理（会误清待重试的续传清单）';
+    if (!/if \(!keepResume\)/.test(DASH_JS))
+      return 'bdown-resume 清理未被 keepResume 门控';
     return '';
   });
+
+  // v1.4.31（数据一致性 F2，QA 审查 W3）：恢复的任务必须**复用持久化的 specKey**，
+  // 不得按（被 ensureSpecComplete 补全过的）rec.spec 重算 —— 番剧补全会写回
+  // bvid/aid，重算出的键与 fresh 派发时 claim 的键不同形，「恢复 ↔ 重新派发」
+  // 互不设防 → 两个任务并发写同一个 .part。行为断言在 tools/test-spec-key.mjs [6]，
+  // 这里加一条源码守卫防 loadPendingTasks 被改回去。
+  check('loadPendingTasks 恢复时复用 rec.specKey（不按补全后 spec 重算）', () =>
+    /if \(rec\.specKey\) task\.specKey = rec\.specKey;/.test(DASH_JS)
+      ? '' : '恢复时重算指纹键 → 番剧「恢复↔重新派发」不同形，两任务并发写同一 .part');
 
   // v1.4.30 运行时 F1：抢占式占位，防 startAll 与 pump 同时启动同一任务
   check('startAll / pump 在 await 之前把状态移出 pending', () =>

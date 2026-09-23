@@ -13,7 +13,7 @@
 | 项 | 验证方式 | 结果 |
 |---|---|---|
 | **P0：dashboard 模块求值零异常** | `tools/test-page-modules.mjs`（最小桩 import 全部 5 个页面模块） | ✅ 5/5 通过 |
-| **变异对照：v1.4.30 的 dashboard.js** | `git show HEAD:...` 写入仓库外副本 + `BDOWN_PAGE_ROOT` 指向副本重跑 | ✅ 精准转红（`ReferenceError: specRegistry` @ :335）→ 修复版转绿，全程不碰工作树 |
+| **变异对照：v1.4.30 的 dashboard.js（基线 `3c70b92`）** | `git show 3c70b92:src/dashboard/dashboard.js` 写入仓库外副本 + `BDOWN_PAGE_ROOT` 指向副本重跑 | ✅ 精准转红（`ReferenceError: specRegistry` @ :335）→ 修复版转绿，全程不碰工作树 |
 | **指纹「恢复 ↔ 重新派发」同形** | `tools/test-spec-key.mjs` [6]（Task + toRecord 往返 + 恢复 claim + has 拦截） | ✅ 35 项通过（28→35） |
 | **番剧补全后重算键 ≠ claim 键** | `test-spec-key` [6] 前提断言 | ✅ 证明「重算不可靠」，持久化 specKey 是必要修复 |
 | 全量套件 | `for f in tools/test-*.mjs tools/lint-*.mjs tools/selftest-*.mjs` | ✅ 36 套件全绿（新增 1 个） |
@@ -30,7 +30,7 @@
 
 - DNR 静态规则 3 收窄到扩展自身（安全 F-004，需动 DNR 副作用测试基线，单独立项）。
 - `persistHistory` 失败降级写（丢弃 spec.info.pages 减体积）。
-- CI 覆盖元检查数字：`lint-ci-coverage` 现扫描 39 个被执行脚本。
+- CI 覆盖元检查数字：`lint-ci-coverage` 现扫描 **41** 个被执行脚本（36 套件 + validate/package/make-samples/mux-test/mp4check）。
 
 ---
 

@@ -57,10 +57,12 @@
           <span class="t-name bd-ellipsis"></span>
           <span class="t-sub bd-hint bd-ellipsis"></span>
         </div>
-        <span class="t-status bd-badge"></span>
+        <!-- v1.4.31（设计审查 P3-1）：状态徽章是 live region、进度条补 progressbar 语义 ——
+             任务状态流转（等待中→解析中→下载中→完成）对屏幕阅读器可感知 -->
+        <span class="t-status bd-badge" role="status"></span>
       </div>
       <div class="task-progress">
-        <div class="bd-progress"><i style="width:0%"></i></div>
+        <div class="bd-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"><i style="width:0%"></i></div>
         <div class="task-progress-meta">
           <span class="t-phase bd-hint"></span>
           <span class="t-bytes bd-hint"></span>

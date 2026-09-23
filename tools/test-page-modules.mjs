@@ -96,7 +96,15 @@ const chromeStub = {
     onInstalled: { addListener() {}, removeListener() {} },
     onStartup: { addListener() {}, removeListener() {} },
     onMessage: { addListener() {}, removeListener() {} },
-    sendMessage: async () => ({}),
+    // content.js 的 start() 用的是 **callback 风格** sendMessage —— 桩必须真的调回调，
+    // 否则「readyState 非 loading」分支在测试里静默挂起，双状态覆盖形同虚设。
+    sendMessage: (msg, cb) => {
+      const res = { ok: true, settings: {} };
+      if (typeof cb === 'function') {
+        try { cb(res); } catch { /* 回调抛错不该炸 import */ }
+      }
+      return Promise.resolve(res);
+    },
     openOptionsPage: async () => {},
   },
   storage: {
@@ -174,6 +182,16 @@ const PAGE_MODULES = [
 ];
 
 let failed = 0;
+// ★ v1.4.31（QA 审查 W2）：异步阶段的异常也要算数。
+//   页面模块的 init() 是 async，import 成功只证明「同步求值零异常」——
+//   init 的异步段（storage 读取后的 DOM 操作）抛的错会变成 unhandledRejection，
+//   不接住的话它只进 stderr、进程照样 exit 0，测试就「绿着漏了」。
+let asyncRejections = 0;
+process.on('unhandledRejection', (err) => {
+  asyncRejections += 1;
+  console.log(`  ✗ 未处理的 Promise 拒绝（异步段）: ${err?.constructor?.name}: ${err?.message}`);
+});
+
 // 变异对照入口：BDOWN_PAGE_ROOT 指向仓库外的一个 src 副本即可对旧版本做
 // 「新测试必须能抓旧 bug」验证，全程不碰工作树（HANDOFF §3.5 的教训）。
 const ROOT = process.env.BDOWN_PAGE_ROOT || '..';
@@ -197,8 +215,31 @@ for (const rel of PAGE_MODULES) {
   }
 }
 
+// ★ v1.4.31（QA 审查 W1）：content.js 的顶层分两个分支 —— `readyState==='loading'`
+//   走 DOMContentLoaded 延迟，**其余值（生产环境 document_idle 注入时是
+//   'interactive'/'complete'）同步执行 start()`**。上面一轮只测了延迟分支。
+//   这里把 readyState 切成生产真实值，再用 cache-busting query 强制重新求值一次，
+//   覆盖同步分支（start → refresh → 注入按钮）。
+documentStub.readyState = 'interactive';
+{
+  const label = '页面模块可加载: src/content/content.js（readyState=interactive，同步 start 分支）';
+  try {
+    await import(`${ROOT}/src/content/content.js?state=interactive`);
+    console.log(`  ✓ ${label}`);
+  } catch (err) {
+    failed += 1;
+    console.log(`  ✗ ${label}`);
+    console.log(`      ${err?.constructor?.name}: ${err?.message}`);
+  }
+}
+
+// 冲掉 init()/start() 留下的微任务，让异步段的异常在统计前浮出
+await new Promise((r) => setImmediate(r));
+await new Promise((r) => setImmediate(r));
+failed += asyncRejections;
+
 console.log(failed === 0
-  ? `\n全部 ${PAGE_MODULES.length} 个页面模块加载通过（模块求值零异常）`
-  : `\n${failed}/${PAGE_MODULES.length} 个页面模块加载失败`);
+  ? `\n全部 ${PAGE_MODULES.length} 个页面模块加载通过（模块求值零异常，异步段零未处理拒绝）`
+  : `\n${failed} 项失败（含异步段 ${asyncRejections}）`);
 // dashboard 的 init() 里有 setInterval（storageBadge 轮询），不显式退出会挂着进程
 process.exit(failed === 0 ? 0 : 1);

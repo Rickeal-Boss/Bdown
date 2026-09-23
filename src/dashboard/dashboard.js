@@ -207,6 +207,8 @@ function renderTask(task) {
 
   const pct = Math.round((task.progress || 0) * 100);
   el.querySelector('.bd-progress > i').style.width = `${pct}%`;
+  // v1.4.31（设计审查 P3-1）：进度条的 aria-valuenow 随渲染同步（min/max 在 HTML 上）
+  el.querySelector('.bd-progress').setAttribute('aria-valuenow', String(pct));
 
   const phase = task.status === 'error' ? task.error : task.phaseText || STATUS_TEXT[task.status];
   el.querySelector('.t-phase').textContent = phase || '';
