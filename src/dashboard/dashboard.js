@@ -230,6 +230,19 @@ async function pickDestination(taskCount) {
     // 由 savePickerHint 在 description 里提示用户按实际音质手动改。
     const mode = task?.spec?.downloadMode || settings.downloadMode;
     const name = task?.filename || 'bilibili';
+
+    // ★ 「音视频分离」是**两文件**输出（singleOutput:false），单文件句柄用不上：
+    //   engine 走 OPFS 临时文件后经 exportFile 落盘，而 exportFile 只认目录目的地，
+    //   kind==='file' 会静默转 chrome.downloads —— 用户选的位置被丢弃，
+    //   产物落到浏览器下载目录（v1.4.28 审查，产品官 P1-3）。
+    //   所以该模式即使单任务也要弹「选择文件夹」，与多任务路径一致。
+    if (mode === 'separate') {
+      if (rememberedDir && $('rememberDir').checked) return { kind: 'dir', dir: rememberedDir };
+      const dir = await window.showDirectoryPicker({ id: 'bdown-dir', mode: 'readwrite', startIn: 'downloads' });
+      if ($('rememberDir').checked) rememberedDir = dir;
+      return { kind: 'dir', dir };
+    }
+
     const { suggested, types } = savePickerHint(mode, name);
     const handle = await window.showSaveFilePicker({
       id: 'bdown-file',

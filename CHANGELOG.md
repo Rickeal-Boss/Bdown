@@ -31,6 +31,9 @@
   `sanitizeBiliUrl` 的外部请求（字幕同路径早走了），已对齐。
 - **弹窗模板变量补齐**（产品官 P1-2）：弹窗自建 vars 漏了日期组，
   `{year}/{month}/{day}` 在弹窗路径恒为空串；`dateVars` 与设置页 `buildVars` 同源。
+- **separate 模式保存位置被静默丢弃**（产品官 P1-3）：该模式是两文件输出，
+  ask 模式下弹的单文件句柄走 exportFile 后被转 `chrome.downloads`——
+  用户选的位置无效、产物落浏览器下载目录。改为 separate 即使单任务也弹「选择文件夹」。
 
 ### 🟡 P2
 
