@@ -232,9 +232,14 @@ main {
   }
 }
 
-/* v1.4.29 设计审查 m3：减弱动态偏好下关闭 toast 动画 */
+/* v1.4.29 设计审查 m3：减弱动态偏好下关闭 toast 动画；
+   v1.4.30 补：.task 的边框色过渡也一并关掉（状态切换时的颜色滑动） */
 @media (prefers-reduced-motion: reduce) {
   .toast {
     animation: none;
+  }
+
+  .task {
+    transition: none;
   }
 }

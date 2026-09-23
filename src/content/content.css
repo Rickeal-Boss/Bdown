@@ -9,6 +9,10 @@
   align-items: center;
   gap: 6px;
   padding: 9px 14px;
+  /* v1.4.30 无障碍：宿主元素由 <div> 改为 <button>（键盘可 Tab / Enter 触发），
+     这里清掉 UA 默认的边框/外观，避免覆盖自绘样式 */
+  border: 0;
+  appearance: none;
   border-radius: 999px;
   background: linear-gradient(135deg, #fb7299, #00a1d6);
   color: #fff;
@@ -43,6 +47,12 @@
   justify-content: center;
   width: 38px;
   height: 100%;
+  /* v1.4.30 无障碍：宿主元素由 <div> 改为 <button>，清掉 UA 默认边框/底色/内边距 */
+  border: 0;
+  padding: 0;
+  background: transparent;
+  appearance: none;
+  font: inherit;
   color: #fff;
   cursor: pointer;
   opacity: 0.85;
@@ -59,8 +69,26 @@
   pointer-events: none;
 }
 
+/* v1.4.30 无障碍：两个注入按钮此前是纯 <div onclick>，键盘完全不可达。
+   改 <button> 后 Enter/Space 走原生 click；这里补可见焦点环。
+   宿主页面底色未知，故用「亮青描边 + 深色外环」双色，浅/深底两种情况下至少一环可见。 */
+.bdown-float:focus-visible,
+.bdown-player-btn:focus-visible {
+  outline: 3px solid #7fd4f0;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 5px rgba(0, 0, 0, 0.65);
+}
+
 @media (prefers-color-scheme: dark) {
   .bdown-float {
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* v1.4.30 设计批次（m3 补齐）：宿主页面开「减弱动态」时关掉注入按钮的过渡 */
+@media (prefers-reduced-motion: reduce) {
+  .bdown-float,
+  .bdown-player-btn {
+    transition: none;
   }
 }

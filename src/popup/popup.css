@@ -181,7 +181,8 @@ code {
 }
 
 .quality-item.is-active {
-  border-color: var(--bd-pink);
+  /* v1.4.30：--bd-pink(#fb7299) 描边对白底仅 2.64:1（选中态的主要指示物，需 ≥3:1），改走墨色 */
+  border-color: var(--bd-pink-ink);
   background: rgba(251, 114, 153, 0.07);
 }
 
@@ -241,7 +242,8 @@ code {
 
 .segmented input:checked + span {
   background: var(--bd-surface);
-  color: var(--bd-pink);
+  /* v1.4.30：--bd-pink(#fb7299) 作文字对白底仅 2.64:1，选中标签改走墨色 */
+  color: var(--bd-pink-ink);
   font-weight: 600;
   box-shadow: var(--bd-shadow);
 }
@@ -249,7 +251,8 @@ code {
 /* v1.4.29 设计审查 C1：分段控件的 input 是 opacity:0 的隐形元素，
    键盘焦点必须画在可视的 span 上（common.css 的全局 :focus-visible 照不到它） */
 .segmented input:focus-visible + span {
-  outline: 2px solid var(--bd-blue);
+  /* v1.4.30：与 common.css 同步改用 --bd-focus（旧 --bd-blue 对白底 2.97:1 不足 3:1） */
+  outline: 2px solid var(--bd-focus);
   outline-offset: 2px;
 }
 
@@ -338,4 +341,13 @@ code {
   border-top: 1px solid var(--bd-border);
   background: var(--bd-surface);
   flex: none;
+}
+
+/* v1.4.30 设计批次（m3 补齐）：common.css 只关掉了共用组件的过渡，
+   弹窗自有组件（清晰度项 hover 边框、分段标签）此前仍会动画。 */
+@media (prefers-reduced-motion: reduce) {
+  .quality-item,
+  .segmented span {
+    transition: none;
+  }
 }

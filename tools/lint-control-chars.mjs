@@ -24,8 +24,11 @@ const ok = (name, cond, msg = '') => {
 };
 
 const ROOT = process.cwd();
-const SCAN_DIRS = ['src', 'rules', 'tools'];
-const SCAN_EXT = /\.(js|mjs|json|css|html)$/;
+// _locales 是扩展的正式源码目录（messages.json 里的文案一旦含真实控制字符，
+// 会原样进入 i18n 替换结果，比源码里的更隐蔽）；docs 与顶层 md 是审查材料，
+// 同样需要保证可被 grep/diff 正常处理。
+const SCAN_DIRS = ['src', 'rules', 'tools', '_locales', 'docs'];
+const SCAN_EXT = /\.(js|mjs|json|css|html|md)$/;
 
 /** 允许的"空白类"控制字符：tab / LF / CR */
 const ALLOWED = new Set([0x09, 0x0a, 0x0d]);
@@ -47,12 +50,12 @@ function walk(dir, out = []) {
 
 const files = [];
 for (const d of SCAN_DIRS) walk(join(ROOT, d), files);
-// manifest 与顶层 json 也一起查
-for (const f of ['manifest.json', 'package.json']) {
+// manifest 与顶层 json / 文档也一起查
+for (const f of ['manifest.json', 'package.json', 'README.md', 'CHANGELOG.md', 'PRIVACY.md']) {
   try { statSync(join(ROOT, f)); files.push(join(ROOT, f)); } catch { /* 不存在就跳过 */ }
 }
 
-console.log(`\n扫描 ${files.length} 个文件（${SCAN_DIRS.join(' / ')} + manifest.json）\n`);
+console.log(`\n扫描 ${files.length} 个文件（${SCAN_DIRS.join(' / ')} + 顶层 json/md）\n`);
 
 const offenders = [];
 

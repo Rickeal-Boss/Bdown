@@ -325,15 +325,23 @@ function renderQualityList() {
       // **无法选择清晰度**（核心路径不可达）。补 role/tabindex/键盘事件。
       el.setAttribute('role', 'radio');
       el.setAttribute('aria-checked', String(opt.quality === selectedQuality));
-      el.addEventListener('click', () => {
+      // v1.4.30 设计审查：选择后走 render()，而 render() → renderQualityList() 会执行
+      //   `listEl.innerHTML = ''`（本文件上方），把**当前持有焦点的这个节点整个销毁** ——
+      //   键盘用户按一次回车选中清晰度后焦点就掉回 <body>，要重新 Tab 一大圈才能回到列表。
+      //   这里在重渲染后把焦点还给「新的」选中项。
+      //   死循环排查：focus() 本身没有任何监听器，不会回触 render()；render 只在用户
+      //   点击/回车时调用一次 → 单次重渲染 + 单次 focus，不会自激。
+      const select = () => {
+        const restoreFocus = document.activeElement === el;
         selectedQuality = opt.quality;
         render();
-      });
+        if (restoreFocus) listEl.querySelector('.quality-item.is-active')?.focus();
+      };
+      el.addEventListener('click', select);
       el.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          selectedQuality = opt.quality;
-          render();
+          select();
         }
       });
     }
@@ -349,7 +357,13 @@ function render() {
   // v1.4.29 安全审查 F-004：弹窗封面 <img src> 此前直接取接口字段，
   // 是全库唯一没过白名单的展示型外部资源（下载侧 v1.4.28 已修）。
   // img src 无脚本执行风险，但被篡改的 pic 会向任意域泄露 IP —— 统一收口。
-  $('cover').src = safeMediaUrl(info.pic || '').url || '';
+  // ★ v1.4.30（安全官 F-001）：`safeMediaUrl()` 返回的是**字符串**
+  //   （util.js:363-366 是 `return safe ? url : ''`），不是对象 —— `.url` 恒为
+  //   undefined，后面的 `|| ''` 又把 undefined 变成空串，所以旧那行**永远得到
+  //   `src=''`**：弹窗封面从来没显示过。也就是说 v1.4.29 声称补上的
+  //   「封面过白名单」保护**从未真正执行**（fail-closed，不是漏洞，但
+  //   「声称修了、实际没生效」正是本项目最该防的形态 —— 焦点样式那次同款）。
+  $('cover').src = safeMediaUrl(info.pic || '');
   $('title').textContent = info.title || '';
   // v1.4.29 设计审查 M4：两行截断的长标题必须有 title 兜底，否则看不到全文
   $('title').title = info.title || '';

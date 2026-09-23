@@ -657,6 +657,7 @@ console.log('\n[10] v1.4.29 六路审查修复回归守卫（DOM 模块用源码
   const DASH_JS = read('src/dashboard/dashboard.js');
   const ENGINE_JS = read('src/core/engine.js');
   const COMMON_CSS = read('src/ui/common.css');
+  const CONTENT_JS = read('src/content/content.js');
 
   // F-1（产品官）：合集 spec 必须带 downloadMode —— 弹窗「本次生效」对合集不能再静默失效
   check('合集 spec 带 downloadMode（与普通分支同源 currentMode()）', () => {
@@ -674,9 +675,74 @@ console.log('\n[10] v1.4.29 六路审查修复回归守卫（DOM 模块用源码
   // 运行时 F2 / 数据一致性 F1：移除任务后的 emit 不得重建节点（幽灵卡）
   check('renderTask 对已移除任务短路（removedIds 守卫）', () =>
     DASH_JS.includes('removedIds.has(task.id)') ? '' : '幽灵卡片守卫缺失');
-  // 数据一致性 F3：恢复的 paused 任务必须注册防重指纹（否则可双写同一 .part）
-  check('loadPendingTasks 恢复 paused 任务时注册 consumedSpecKeys', () =>
-    DASH_JS.includes('consumedSpecKeys.add(specKey(task.spec') ? '' : '跨会话 paused 指纹缺口仍在（可双写同一 .part）');
+  // v1.4.30 数据一致性 F3：恢复的 paused 任务必须注册防重指纹（否则可双写同一 .part）。
+  // 指纹实现已从「裸 Set + 事后按 spec 重算键」换成 engine 的 SpecKeyRegistry
+  // （键在 claim 时记到 task 上），所以断言改为「注册与释放都必须走注册表」。
+  check('防重指纹走 SpecKeyRegistry（claim/release 成对，键记在 task 上）', () =>
+    DASH_JS.includes('specRegistry.claim(task)') && DASH_JS.includes('specRegistry.release(task)')
+      ? '' : '跨会话 paused / 终态释放的指纹缺口仍在（可双写同一 .part）');
+
+  // v1.4.30 P1（运行时 F0 / 数据一致性 F2 缺口 A）：
+  // specKey 含 cid 会导致「注册键（未补全 spec）≠ 释放键（已补全 spec）」→ 指纹永久泄漏。
+  check('specKey 不含 cid 且定义在 engine.js（与 ensureSpecComplete 同模块）', () => {
+    const m = ENGINE_JS.match(/export function specKey\(spec\)\s*\{[\s\S]*?\n\}/);
+    if (!m) return 'specKey 未在 engine.js 导出（定义身份的代码必须与改写身份的代码同模块）';
+    const code = m[0].split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    // 唯一允许的 cid 用法：没有任何上游标识时兜底（`anchor ? '' : spec?.cid`）
+    if (!/anchor\s*\?\s*''\s*:/.test(code)) {
+      return 'specKey 里 cid 的用法变了 —— 请重新验证「注册键 == 释放键」仍成立';
+    }
+    if (/\bspec\?\.cid\s*\|\|\s*''\s*,/.test(code)) {
+      return 'specKey 疑似把 cid 无条件算进了键（会重现指纹永久泄漏）';
+    }
+    return '';
+  });
+
+  // v1.4.30 产品 F-1：弹窗派发课程任务必须透传 cheeseId（否则 playurl 走 ugc 分支必失败）
+  check('弹窗 spec 透传 cheeseId（课程任务）', () =>
+    POPUP_JS.includes('cheeseId: currentSpec.cheeseId') ? '' : '课程任务派发时丢了 cheeseId（v1.4.29 F-3 只修了一半）');
+
+  // v1.4.30 安全官 F-001：safeMediaUrl 返回的是**字符串**，取 .url 会恒得到 ''
+  check('弹窗封面不误用 safeMediaUrl(...).url', () =>
+    POPUP_JS.includes('safeMediaUrl(info.pic || \'\').url') ? '封面 src 恒为空串（白名单保护实际从未生效）' : '');
+
+  // v1.4.30：content.js 不得再产出全库无人认领的 cheeseSeasonId。
+  // ⚠️ 只看**代码行** —— 修复说明的注释里会提到旧字段名，不能因此误报。
+  check('content.js 的课程 ss 分支归一成 cheeseId', () => {
+    const code = CONTENT_JS.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    if (code.includes('cheeseSeasonId')) return 'content.js 仍在产出 cheeseSeasonId（下游只认 cheeseId）';
+    return CONTENT_JS.includes('cheeseId: Number(css[1])') ? '' : '课程 ss 分支未归一成 cheeseId';
+  });
+
+  // v1.4.30 运行时 F1：番剧（pgc）必须能在 engine 侧补全 cid
+  check('ensureSpecComplete 含番剧（epId/seasonId）分支', () =>
+    ENGINE_JS.includes('番剧：未能从 season 接口解析出 cid') ? '' : '番剧 spec 无法补全 cid → 页面按钮/右键菜单 100% 失败');
+
+  // v1.4.30：普通失败路径必须关闭已打开的输出 sink（否则句柄泄漏 + 重试打不开）
+  check('run() 失败分支关闭已打开的 sink', () =>
+    ENGINE_JS.includes('失败收尾') ? '' : '失败路径不关 sink（句柄泄漏 / 重试永久失败）');
+
+  // v1.4.30 数据一致性 F3：「清理临时文件」不得在活跃任务存在时执行，且 error 必须计入活跃
+  check('btnClean 先判定活跃再清理，且 error 计入活跃', () => {
+    if (!DASH_JS.includes("'saving', 'error'")) return 'error 未计入 hasLive（会误清待重试的续传清单）';
+    return /const hasLive[\s\S]{0,400}?\.some\(/.test(DASH_JS) && /hasLive\)\s*\{[\s\S]{0,200}?return;/.test(DASH_JS)
+      ? '' : 'hasLive 判定未前移到 cleanupAll 之前（会删掉在途大文件的临时产物）';
+  });
+
+  // v1.4.30 运行时 F1：抢占式占位，防 startAll 与 pump 同时启动同一任务
+  check('startAll / pump 在 await 之前把状态移出 pending', () =>
+    /task\.status = 'resolving'/.test(DASH_JS) && /next\.status = 'resolving'/.test(DASH_JS)
+      ? '' : '未占位 → 同一任务可能被 run 两次（实测 t3/t4/t5 各跑两次）');
+
+  // v1.4.30 产品 F-4：UGC 合集把 ugcSeason.id 写进 spec.seasonId，不能据此判番剧
+  check('NFO 的 isBangumi 不含 seasonId（防合集被写成 episode）', () =>
+    /isBangumi = !!\(spec\.epId \|\| spec\.cheeseId\)/.test(ENGINE_JS)
+      ? '' : 'isBangumi 仍把 seasonId 当番剧标志 → 合集每一集 NFO 都是 season=1/episode=1');
+
+  // v1.4.30 数据一致性 F1：pendingTasks 的读改写必须收敛到 SW 的串行链
+  check('pendingTasks 消费/删除走 SW 串行链（CONSUME_PENDING / PRUNE_PENDING）', () =>
+    DASH_JS.includes("type: 'CONSUME_PENDING'") && DASH_JS.includes("type: 'PRUNE_PENDING'")
+      ? '' : 'dashboard 仍在自行读改写 pendingTasks（跨上下文会丢任务 / 复活条目）');
   // 运行时 F1：暂停/取消落在 fetchTo 重试子路径时也必须关 sink + 落清单
   check('fetchTo 重试子路径的 abort 统一走 abortExit 收尾（≥3 处调用）', () => {
     const n = (ENGINE_JS.match(/await abortExit\(\)/g) || []).length;

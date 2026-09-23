@@ -98,6 +98,35 @@ jobs:
       - name: 设置枚举白名单自检（非法值回落默认）
         run: node tools/test-settings-enum.mjs
 
+      # v1.4.30 的 P1：防重指纹「注册键 ≠ 释放键」。
+      # specKey 把派生字段 cid 算进指纹，而注册用 storage 里的原始 spec（无 cid）、
+      # 释放用 ensureSpecComplete 原地补全后的 spec（有 cid）—— 键永不相等，
+      # Set.delete 静默失败 → 指纹永久泄漏 → 同会话内该视频再也派发不出去（无提示）。
+      # 本套件端到端复现该场景，并覆盖番剧 epId/seasonId 分支。
+      - name: 任务防重指纹自检（注册键必须等于释放键 / 番剧入口补全）
+        run: node tools/test-spec-key.mjs
+
+      # 任务收尾编排（计数→持久化→清 pendingTasks→释放指纹→通知→泵）与 fetchTo 的
+      # abort 收尾。这两处原先住在依赖 document 的 dashboard.js / 内联闭包里，CI
+      # **根本无法断言** —— 变异测试删掉 release / prune / sink.close 调用后，
+      # 33 个套件依旧全绿。抽成可注入依赖的模块后这里做真正的行为断言。
+      - name: 任务收尾编排自检（六步不可少 / paused 不释放指纹 / abort 先关 sink 再记账）
+        run: node tools/test-lifecycle.mjs
+
+      # v1.4.30 最重的一条 P1：`specKey()` 把 cid 算进键 → 注册用未补全的 spec、
+      # 释放用被 ensureSpecComplete 原地补全后的 spec → 两把键永不相等 →
+      # Set.delete 删一个不存在的键（静默 false）→ 指纹永久泄漏 →
+      # 从悬浮按钮/右键菜单下载过的视频，同会话内再也派发不出去（连 toast 都没有）。
+      # 这条不变量此前**没有任何断言**，所以它坏了几个版本都没人发现。
+      - name: 防重指纹自检（注册键必须等于释放键）
+        run: node tools/test-spec-key.mjs
+
+      # 任务收尾编排（计数/持久化/prune/释放指纹/泵）从 dashboard.js 抽到
+      # core/lifecycle.js 并改为依赖注入 —— 于是它能在 CI 里直接跑了。
+      # 以前这段只能靠 selftest-core 的 grep 计数断言兜着（存在性 ≠ 有效性）。
+      - name: 任务收尾编排自检（依赖注入，不靠 grep 计数）
+        run: node tools/test-lifecycle.mjs
+
       - name: NFO 元数据自检（XML 转义 / movie+episode+tvshow 三形态）
         run: node tools/test-nfo.mjs
 
