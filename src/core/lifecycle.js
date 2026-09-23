@@ -1,3 +1,5 @@
+import { shouldHoldSpecKey } from './engine.js';
+
 /**
  * 任务收尾编排（与 DOM / chrome API 解耦）。
  *
@@ -56,10 +58,13 @@ export function createTaskFinisher({ onSettled, persistHistory, prunePending, re
     await guard('persistHistory', () => persistHistory());
     await guard('prunePending', () => prunePending(task));
     // 释放指纹：允许同一会话内再次下载这个视频（例如换个清晰度重下）。
-    // ★ paused **不释放** —— 它还留在列表里等着被「继续」，此时若放行同名派发
-    //   会建出第二个同内容任务，继续时两路写同一个 .part，文件必坏。
+    // ★ v1.4.31：哪些终态**不释放**由 `shouldHoldSpecKey()` 单独定义（engine.js），
+    //   与 dashboard.loadPendingTasks 的恢复 claim 共用同一份判断 ——
+    //   第一笔修复里这两处各写各的，收尾漏了「error 且带 resumeKeys」（.part/.json
+    //   刻意留给「重试」）而恢复侧包含它：任务失败 → 释放 → 同视频重新派发放行
+    //   → 点「重试」= 两任务并发写同一 .part。策略必须只有一处定义。
     // ★ 这一句**必须**在 guard 之外：它是收尾里唯一"少做就静默坏掉"的步骤。
-    if (task.status !== 'paused') registry.release(task);
+    if (!shouldHoldSpecKey(task)) registry.release(task);
     if (notify && task.status === 'done') await guard('notifyDone', () => notifyDone(task));
     pump();
   };

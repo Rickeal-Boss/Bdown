@@ -1613,6 +1613,30 @@ export class SpecKeyRegistry {
 }
 
 /**
+ * 任务到某个状态时**是否应继续持有防重指纹**（v1.4.31 二轮收口，运行时审查 P1）。
+ *
+ * ★ 这条判断**必须只有这一个定义点**。v1.4.31 第一笔修复里，「恢复时对哪些状态
+ *   claim」（dashboard.loadPendingTasks）和「收尾时对哪些状态不 release」
+ *   （lifecycle.finishTracked）是两处独立写的条件 —— 收尾侧漏了
+ *   「error 且带 resumeKeys」，恢复侧却包含它，同一条不变量两头不一致：
+ *   任务失败（.part/.json 刻意留给「重试」）→ 收尾释放指纹 → 同视频重新派发被放行
+ *   → 用户点旧任务「重试」→ 两个任务并发写同一个 resumeKey 的 .part。
+ *
+ * 语义：实际还**持有 OPFS 续传数据**的终态都要占住指纹 ——
+ *   - `paused`：等着被「继续」；
+ *   - `error` 且带 resumeKeys：等着被「重试」。
+ * `pending` 不在此列（它不是终态；恢复路径的 claim 由调用方自行附加）。
+ *
+ * @param {{ status?: string, resumeKeys?: string[] }} [task]
+ * @returns {boolean}
+ */
+export function shouldHoldSpecKey(task) {
+  if (!task) return false;
+  return task.status === 'paused'
+    || (task.status === 'error' && Array.isArray(task.resumeKeys) && task.resumeKeys.length > 0);
+}
+
+/**
  * 根据 playurl 结果 + 设置，决定「下什么、下多大」。
  */
 export function buildPlan(playInfo, settings, spec) {

@@ -79,7 +79,35 @@ console.log('\n[2] ★ paused 任务绝不能被释放指纹（否则「继续�
   ok('canceled：指纹被释放（对照组）', r2.keys.size === 0, `集合剩 ${r2.keys.size} 个键`);
 }
 
-console.log('\n[3] 完成通知只在 notify 且终态为 done 时触发');
+console.log('\n[3] ★ error 且带 resumeKeys 的任务：指纹必须继续持有（v1.4.31 二轮收口）');
+{
+  // 运行时审查 P1：第一笔修复里收尾只跳过 paused，而恢复路径（dashboard）对
+  // 「error 且带 resumeKeys」会 claim —— 同一条不变量两头不一致。收尾释放指纹后
+  // 同视频重新派发被放行，用户点旧任务「重试」= 两任务并发写同一 .part。
+  const { finisher, calls, registry } = makeFinisher();
+  const task = { id: 'e1', status: 'error', resumeKeys: ['rk-1', 'rk-2'], spec: { bvid: 'BV1' } };
+  registry.claim(task);
+  await finisher(task);
+  ok('error+resumeKeys：指纹仍然被占住（.part 留给「重试」）',
+    registry.keys.size === 1, `集合剩 ${registry.keys.size} 个键`);
+  ok('error：其余收尾动作照常执行', calls.includes('prune:e1') && calls.includes('pump'));
+
+  // 对照组 1：error 但**没有** resumeKeys（清过清单）→ 放行
+  const { finisher: f2, registry: r2 } = makeFinisher();
+  const t2 = { id: 'e2', status: 'error', resumeKeys: [], spec: { bvid: 'BV1' } };
+  r2.claim(t2);
+  await f2(t2);
+  ok('error 无 resumeKeys：指纹被释放（对照组）', r2.keys.size === 0, `集合剩 ${r2.keys.size} 个键`);
+
+  // 对照组 2：resumeKeys 非数组（脏记录）→ 放行，不得抛错
+  const { finisher: f3, registry: r3 } = makeFinisher();
+  const t3 = { id: 'e3', status: 'error', resumeKeys: 'garbage', spec: { bvid: 'BV1' } };
+  r3.claim(t3);
+  await f3(t3);
+  ok('error 脏 resumeKeys：指纹被释放且不抛错（对照组）', r3.keys.size === 0, `集合剩 ${r3.keys.size} 个键`);
+}
+
+console.log('\n[4] 完成通知只在 notify 且终态为 done 时触发');
 {
   for (const [status, notify, expected] of [
     ['done', true, true], ['done', false, false],
@@ -94,7 +122,7 @@ console.log('\n[3] 完成通知只在 notify 且终态为 done 时触发');
   }
 }
 
-console.log('\n[4] ★ 收尾链容错：单步失败不得让「释放指纹」被跳过');
+console.log('\n[5] ★ 收尾链容错：单步失败不得让「释放指纹」被跳过');
 {
   // prune 抛错（storage 配额满 / 并发写冲突都会）
   const errors = [];
@@ -138,7 +166,7 @@ console.log('\n[4] ★ 收尾链容错：单步失败不得让「释放指纹」
   ok('onError 自身抛错被吞掉', okOnErrorThrows);
 }
 
-console.log('\n[5] ★ abortFetchExit：取消时必须先关 sink、再落清单（顺序不能颠倒）');
+console.log('\n[6] ★ abortFetchExit：取消时必须先关 sink、再落清单（顺序不能颠倒）');
 {
   const order = [];
   const sink = { async close() { order.push('close'); } };

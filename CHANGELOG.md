@@ -55,6 +55,30 @@
 
 ### 🟡 P3 / 加固
 
+- **第二轮审查（设计 / QA / 产品 / 运行时对修复后版本复审）追加收口**：
+  - 🔴→🟠 **指纹持有策略单一真源**：收尾（lifecycle）对 `error` 任务照常释放指纹，
+    而恢复路径对「error 且带 resumeKeys」会 claim —— 两处口径打架：任务失败 →
+    释放 → 同视频重新派发放行 → 点「重试」= 两任务并发写同一 `.part`。
+    抽 `engine.shouldHoldSpecKey()` 单一函数，收尾与恢复共用（`test-lifecycle`
+    补 error+resumeKeys 三断言，`selftest-core` 加单一真源源码守卫）。
+  - **「全部取消」对 pending 任务落地取消**：pending 从未 run，`cancel()` 只是
+    abort 没人监听的控制器 —— 状态不落地，v1.4.31 起 pending 已持久化，
+    会变成「跨会话僵尸」。现在直接置终态 + 释放指纹 + 落盘。
+  - **`persistHistory` 写链串行化**：4 个调用点全量覆盖写无串行，
+    旧快照后到会覆盖新快照（任务蒸发/复活/状态回退）。与 SW 的
+    pendingTasks 写链同招：快照在链内取，单调不回退。
+  - **恢复窗口内的派发先记账、恢复完成再补消费**：`loadPendingTasks` 的
+    await 窗口里 onChanged 触发的 acceptPending 会与恢复循环交错 → 同视频双卡。
+    监听仍先注册（v1.4.29 的教训不变），但恢复完成前只记账。
+  - **v1.4.30 旧记录的番剧恢复兼容**：旧记录无 `specKey` 字段，按「派发原键口径」
+    （epId/seasonId + pageIndex）重算兜底；/ss 链接派发的无法还原链接形态，已知局限。
+  - **pendingTasks 满员丢最旧**（首版修复方向写反：丢新 = 用户点的下载永不出现）。
+  - **a11y**：任务状态徽章加 `role="status"`、进度条补 `role="progressbar"` +
+    `aria-valuenow`（设计审查 P3-1）。
+  - **页面模块冒烟加固**：补 content.js 的 `readyState=interactive` 同步 start
+    分支（cache-busted 二次求值）；接住 `unhandledRejection` + 冲刷微任务
+    （异步段异常不再「绿着漏了」）。
+
 - **持久化失败对用户可见**（数据一致性 F3）：`persistHistory` 失败原本只进
   console —— 它是任务唯一的持久化落点，失败即「关页即蒸发」且无感。
   `onError` 对该步单独 toast。

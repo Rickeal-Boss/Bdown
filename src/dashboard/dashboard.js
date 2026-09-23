@@ -6,7 +6,7 @@
  * 直接写入用户选定的文件，天然支持 GB 级文件。
  */
 
-import { DownloadEngine, Task, SpecKeyRegistry } from '../core/engine.js';
+import { DownloadEngine, Task, SpecKeyRegistry, specKey, shouldHoldSpecKey } from '../core/engine.js';
 import { createTaskFinisher } from '../core/lifecycle.js';
 import { BiliApi } from '../core/api.js';
 import { loadSettings, saveSettings, onSettingsChanged, savePickerHint } from '../core/settings.js';
@@ -662,9 +662,26 @@ function pump() {
 
 const HISTORY_KEY = 'taskHistory';
 
+/**
+ * taskHistory 写链（v1.4.31 二轮收口，运行时审查 P2）。
+ *
+ * ★ persistHistory 一共有 **4 个调用点**（acceptPending / 移除任务 / 清除终态 /
+ *   收尾 finishTracked），都是「全量覆盖写」。不串行的话，两次并发调用的
+ *   快照-写入交错时**后完成的旧快照覆盖先完成的新快照**：
+ *   「接受任务 A（含 A）」慢于「任务 B 收尾（不含 A，B 也没在快照里）」→ A 蒸发；
+ *   「任务 B 收尾（状态 done）」慢于「用户移除 B（列表里已无 B）」→ B 复活。
+ *   与 SW 的 pendingTasksWriteChain 同一招：快照在链内取，天然单调不回退。
+ */
+let historyWriteChain = Promise.resolve();
+
 async function persistHistory() {
-  const records = engine.tasks.slice(-200).map((t) => t.toRecord());
-  await chrome.storage.local.set({ [HISTORY_KEY]: records });
+  historyWriteChain = historyWriteChain
+    .catch(() => {})
+    .then(async () => {
+      const records = engine.tasks.slice(-200).map((t) => t.toRecord());
+      await chrome.storage.local.set({ [HISTORY_KEY]: records });
+    });
+  return historyWriteChain;
 }
 
 /**
@@ -785,19 +802,27 @@ async function loadPendingTasks() {
     //   重新派发」互不设防 → 两个任务并发写同一个 resumeKey 的 .part
     //   （正是"同一 OPFS 文件两个 writable 并存"的坏文件场景）。
     //   toRecord 现在把 task.specKey 一起持久化，恢复时直接复用，两端同形。
-    if (rec.specKey) task.specKey = rec.specKey;
+    if (rec.specKey) {
+      task.specKey = rec.specKey;
+    } else if (rec.spec?.epId || rec.spec?.seasonId) {
+      // ★ v1.4.31 二轮（产品 P3-2 / 运行时 P2-2）：**v1.4.30 旧记录没有 specKey**
+      //   （该字段本版才加入 toRecord）。番剧 rec.spec 已被补全（多了 bvid/aid），
+      //   直接按它重算必然不同形。按「派发原键口径」（epId/seasonId + pageIndex）
+      //   重算是有限兜底：ep 链接派发的能对上；/ss 链接派发的无法从记录还原当初
+      //   的链接形态（epId 已被补全），仍可能漏 —— 升级首会话的已知局限。
+      task.specKey = specKey({
+        epId: rec.spec.epId,
+        seasonId: rec.spec.seasonId,
+        pageIndex: rec.spec.pageIndex,
+      });
+    }
     // 会话内不释放指纹的任务要占住：
-    //   - paused：等着被「继续」，放行同名派发会建出第二个同内容任务；
+    //   - paused / error+resumeKeys 的判据统一走 `shouldHoldSpecKey()`（engine.js），
+    //     与收尾的 release 条件**同一份定义** —— 二轮收口前这两处各写各的，
+    //     收尾漏了 error+resumeKeys 而恢复侧包含它，同一条不变量两头打架；
     //   - pending（v1.4.31 F1 新恢复的形态）：等着被「开始」，同上；
-    //   - error 且带 resumeKeys（v1.4.31 F4）：.part/.json 刻意保留给「重试」，
-    //     它实际持有 OPFS 状态却不参与防重的话，重新派发 + 点「重试」
-    //     依旧是两路并发写同一个 .part。
     // done / canceled 恰恰相反：必须**不**占，否则同会话内再也下不了第二次。
-    if (
-      task.status === 'paused'
-      || task.status === 'pending'
-      || (task.status === 'error' && task.resumeKeys.length > 0)
-    ) {
+    if (task.status === 'pending' || shouldHoldSpecKey(task)) {
       if (task.status === 'paused') task.paused = true;
       try { specRegistry.claim(task); } catch { /* ignore */ }
     }
@@ -920,12 +945,26 @@ async function init() {
   });
   $('btnCancelAll').addEventListener('click', () => {
     let n = 0;
+    let dirty = false;
     for (const t of engine.tasks) {
-      if (['pending', 'resolving', 'downloading', 'muxing', 'saving'].includes(t.status)) {
+      if (t.status === 'pending') {
+        // ★ v1.4.31 二轮（产品审查 P2）：pending 任务**从未 run**，cancel() 只是
+        //   abort 一个没人监听的 controller —— 状态不变、不落盘。v1.4.31 起
+        //   pending 会随 acceptPending 持久化，这里不真正落地取消，
+        //   「全部取消」后重开下载中心会看到一张原封不动的等待中卡片（跨会话僵尸）。
+        //   直接置终态 + 释放指纹 + 落盘。
+        t.status = 'canceled';
+        t.finishedAt = Date.now();
+        releaseSpecKey(t);
+        renderTask(t);
+        dirty = true;
+        n += 1;
+      } else if (['resolving', 'downloading', 'muxing', 'saving'].includes(t.status)) {
         t.cancel();
         n += 1;
       }
     }
+    if (dirty) persistHistory();
     showToast(n ? `已取消 ${n} 个任务` : '没有进行中的任务');
   });
   $('btnClearDone').addEventListener('click', () => {
@@ -952,9 +991,21 @@ async function init() {
   // → 才 addListener。中间这个窗口里派发的任务被写进 pendingTasks 后
   // **没有任何监听者**，UI 不显示；而 service-worker 已刻意移除 tabs.reload()
   // （不会重刷页面补偿）→ 任务凭空消失，只有重开下载中心才恢复。
+  //
+  // ★ v1.4.31 二轮（运行时审查 P2）：监听先注册，但**恢复完成前到达的事件先记账、
+  //   恢复完成后再补消费** —— loadPendingTasks 里「读 taskHistory → 逐条恢复」
+  //   有 await 窗口，期间 onChanged 触发的 acceptPending 会与恢复循环交错：
+  //   恢复的占指纹、去重都还没就位 → 同一视频「恢复一张卡 + 派发一张卡」双卡。
+  //   派发的数据此刻安全地留在 SW 的 pendingTasks 里，补消费时原样取走，无丢失。
+  let pendingQueueReady = false;
+  let queuedAccept = false;
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !changes.pendingTasks) return;
     // 注意：handler 里不直接信 changes.pendingTasks.newValue —— 见 acceptPending 的说明
+    if (!pendingQueueReady) {
+      queuedAccept = true;
+      return;
+    }
     acceptPending(true).catch((e) => showToast(e.message));
   });
 
@@ -968,6 +1019,12 @@ async function init() {
   });
 
   const added = await loadPendingTasks();
+  pendingQueueReady = true;
+  if (queuedAccept) {
+    // 恢复窗口内到达的派发：现在恢复循环已结束、指纹已占好，安全补消费
+    queuedAccept = false;
+    await acceptPending(true).catch((e) => showToast(e.message));
+  }
   refreshStorageBadge();
   setInterval(refreshStorageBadge, 8000);
 

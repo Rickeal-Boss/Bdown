@@ -29,19 +29,21 @@ function appendPendingTasks(tasks) {
     .catch(() => {})
     .then(async () => {
       const { pendingTasks: existing = [] } = await chrome.storage.local.get('pendingTasks');
-      // ★ v1.4.31（安全审计 F-002）：**入队前设上限**。
+      // ★ v1.4.31（安全审计 F-002 + 二轮产品/运行时 P3）：**入队设上限、满员丢最旧**。
       //
       //   manifest 声明了 `unlimitedStorage`（配额闸对这里失效），而
       //   `OPEN_DASHBOARD` 的 payload.tasks 直接 `[...existing, ...tasks]` ——
       //   扩展自有上下文里的异常循环能把 storage 无界写穿。三道收口：
-      //     ① 只收对象条目；② 总量钳到 MAX_PENDING_TASKS；③ 满了就丢新的
-      //   （与 taskHistory 的 slice(-200) 保留新记录方向一致：丢最不该进的尾部）。
-      const room = Math.max(0, MAX_PENDING_TASKS - existing.length);
-      const incoming = tasks
-        .filter((t) => t && typeof t === 'object')
-        .slice(0, room);
+      //     ① 只收对象条目；② 总量钳到 MAX_PENDING_TASKS；③ 超限丢**最旧**的。
+      //   （首版修复曾写成「满了丢新任务」，与本仓库 taskHistory 的
+      //   `slice(-200)` 保留新记录的方向相反 —— 用户在满员后点的下载永远
+      //   不出现，正是「静默吞掉」的又一形态。丢弃本身仍然静默，上限 200
+      //   在正常使用（合集批量几十条）下不可触达，先接受这个取舍。）
+      const validExisting = existing.filter((t) => t && typeof t === 'object');
+      const incoming = tasks.filter((t) => t && typeof t === 'object');
       if (!incoming.length) return;
-      await chrome.storage.local.set({ pendingTasks: [...existing, ...incoming] });
+      const merged = [...validExisting, ...incoming].slice(-MAX_PENDING_TASKS);
+      await chrome.storage.local.set({ pendingTasks: merged });
     });
   return pendingTasksWriteChain;
 }

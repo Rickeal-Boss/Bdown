@@ -747,9 +747,30 @@ console.log('\n[10] v1.4.29 六路审查修复回归守卫（DOM 模块用源码
   // bvid/aid，重算出的键与 fresh 派发时 claim 的键不同形，「恢复 ↔ 重新派发」
   // 互不设防 → 两个任务并发写同一个 .part。行为断言在 tools/test-spec-key.mjs [6]，
   // 这里加一条源码守卫防 loadPendingTasks 被改回去。
-  check('loadPendingTasks 恢复时复用 rec.specKey（不按补全后 spec 重算）', () =>
-    /if \(rec\.specKey\) task\.specKey = rec\.specKey;/.test(DASH_JS)
-      ? '' : '恢复时重算指纹键 → 番剧「恢复↔重新派发」不同形，两任务并发写同一 .part');
+  check('loadPendingTasks 恢复时复用 rec.specKey（不按补全后 spec 重算）', () => {
+    if (!/task\.specKey = rec\.specKey;/.test(DASH_JS))
+      return '恢复未复用持久化的 specKey → 番剧「恢复↔重新派发」不同形，两任务并发写同一 .part';
+    // v1.4.30 旧记录没有 specKey 字段：番剧 spec 已被补全（多了 bvid/aid），
+    // 必须按「派发原键口径」（epId/seasonId + pageIndex）重算兜底
+    if (!/else if \(rec\.spec\?\.epId \|\| rec\.spec\?\.seasonId\)/.test(DASH_JS))
+      return '旧记录（无 specKey 字段）的番剧恢复缺「原键口径」重算兜底';
+    return '';
+  });
+
+  // v1.4.31 二轮（运行时审查 P1）：「哪些终态继续持有指纹」必须只有一份定义 ——
+  // 收尾（lifecycle）与恢复（dashboard.loadPendingTasks）都引用 engine.js 的
+  // shouldHoldSpecKey。历史上两处各写各的，收尾漏了 error+resumeKeys 而恢复侧
+  // 包含它 → 失败任务释放指纹后重新派发 + 点「重试」= 两任务并发写同一 .part。
+  check('指纹持有策略 shouldHoldSpecKey 单一真源（收尾/恢复共用）', () => {
+    const LC_JS = read('src/core/lifecycle.js');
+    if (!/export function shouldHoldSpecKey/.test(ENGINE_JS))
+      return 'shouldHoldSpecKey 未在 engine.js 定义（单一真源被挪走）';
+    if (!/if \(!shouldHoldSpecKey\(task\)\) registry\.release\(task\);/.test(LC_JS))
+      return '收尾释放条件又写成独立判断（与恢复侧口径打架）';
+    if (!/shouldHoldSpecKey\(task\)/.test(DASH_JS))
+      return '恢复路径未引用 shouldHoldSpecKey（口径可能再次分叉）';
+    return '';
+  });
 
   // v1.4.30 运行时 F1：抢占式占位，防 startAll 与 pump 同时启动同一任务
   check('startAll / pump 在 await 之前把状态移出 pending', () =>
